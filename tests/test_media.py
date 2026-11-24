@@ -5,6 +5,7 @@ from __future__ import annotations
 from fractions import Fraction
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from media_io import (
@@ -12,10 +13,12 @@ from media_io import (
     check_prores_dimensions,
     delivery_notes,
     encoder_pix_fmt,
+    encoder_plan,
     parse_probe_json,
     parse_timecode,
     shift_timecode,
 )
+from resample import normalized_grid
 
 
 def _video(**overrides) -> dict:
@@ -138,3 +141,26 @@ def test_prores_dimension_guard():
 def test_bad_timecode():
     with pytest.raises(MediaError):
         parse_timecode("1:00:00:00")
+
+
+def test_encoder_plan_keeps_16k_chunks_to_one_frame():
+    workers, chunk = encoder_plan(15360, 8640, requested_workers=0)
+    assert chunk == 1
+    assert workers >= 1
+    workers, chunk = encoder_plan(7680, 4320)
+    assert chunk == 2
+    preview_workers, preview_chunk = encoder_plan(960, 540)
+    assert preview_chunk == 12
+    assert encoder_plan(960, 540, requested_workers=2)[0] == 2
+
+
+def test_gpu_grid_lands_on_the_same_pixel_center_as_opencv():
+    # align_corners=False maps pixel i to (i + 0.5) / size * 2 - 1.
+    # The inverse of normalized_grid must return the OpenCV map value.
+    map_x = np.array([[0.0, 1.5, 10.25]], dtype=np.float32)
+    map_y = np.array([[3.0, 4.0, 0.5]], dtype=np.float32)
+    grid = normalized_grid(map_x, map_y, src_w=32, src_h=16)
+    recovered_x = ((grid[..., 0] + 1.0) * 32 - 1.0) / 2.0
+    recovered_y = ((grid[..., 1] + 1.0) * 16 - 1.0) / 2.0
+    assert recovered_x == pytest.approx(map_x, abs=1e-5)
+    assert recovered_y == pytest.approx(map_y, abs=1e-5)

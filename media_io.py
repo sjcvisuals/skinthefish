@@ -8,12 +8,15 @@ are not reinterpreted. The encoder is ``prores_ks`` with the source profile,
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
 import json
 import logging
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 import threading
 
 import numpy as np
@@ -621,6 +624,272 @@ class ProResWriter:
             )
         text = detail or "no stderr"
         return f"ffmpeg encode failed ({code}): {text}.{hint}"
+
+
+def encoder_plan(width: int, height: int, requested_workers: int = 0) -> tuple[int, int]:
+    """How many ProRes encodes to run at once, and how many frames each one takes.
+
+    ``prores_ks`` barely gets faster with extra threads inside one process.
+    Separate processes do. The chunk size keeps the queued frames under about
+    8 GB: one frame at 16K, two at 8K, a short run at preview size.
+    """
+    cores = os.cpu_count() or 1
+    frame_bytes = width * height * 6
+    if frame_bytes >= 400 * 1024 * 1024:
+        chunk = 1
+    elif frame_bytes >= 80 * 1024 * 1024:
+        chunk = 2
+    else:
+        chunk = 12
+    budget = 8 * 1024 ** 3
+    workers = max(1, min(cores, budget // max(frame_bytes * chunk, 1)))
+    if requested_workers > 0:
+        workers = requested_workers
+    return workers, chunk
+
+
+class ChunkedProResWriter:
+    """Encode several ProRes chunks at once, then join them and copy the audio.
+
+    The picture, vendor id, and color tags are written by each chunk. The join
+    is a stream copy, so it does not resample again. Timecode, audio, and the
+    source metadata are applied on that join.
+    """
+
+    def __init__(
+        self,
+        output: Path,
+        *,
+        source: Path,
+        width: int,
+        height: int,
+        fps: Fraction,
+        profile: int,
+        info: MediaInfo,
+        timecode: str | None,
+        start_frame: int,
+        frame_count: int | None,
+        ffmpeg: str = "ffmpeg",
+        overwrite: bool = False,
+        workers: int = 0,
+        on_encoded=None,
+    ) -> None:
+        check_prores_dimensions(width, height)
+        self.output = output
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.profile = profile
+        self.pix_fmt = encoder_pix_fmt(profile)
+        self.ffmpeg = ffmpeg
+        self.overwrite = overwrite
+        self.source = source
+        self.info = info
+        self.timecode = timecode
+        self.start_frame = start_frame
+        self.frame_count = frame_count
+        self.workers, self.chunk = encoder_plan(width, height, workers)
+        self.on_encoded = on_encoded
+        self.frames_written = 0
+        self._buffer: list[np.ndarray] = []
+        self._parts: list[Path] = []
+        self._pending: list[tuple[object, int]] = []
+        self._procs: list[subprocess.Popen[bytes]] = []
+        self._proc_lock = threading.Lock()
+        self._pool: ThreadPoolExecutor | None = None
+        self._temp: tempfile.TemporaryDirectory[str] | None = None
+        self._closed = False
+        self._failed = False
+
+    def __enter__(self) -> ChunkedProResWriter:
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        if self.output.exists() and not self.overwrite:
+            raise MediaError(
+                f"output already exists: {self.output} (pass --overwrite to replace it)"
+            )
+        self._temp = tempfile.TemporaryDirectory(prefix="skinthefish-", dir=self.output.parent)
+        self._pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="prores")
+        log.info(
+            "encoding with %d ProRes process%s, %d frame%s each",
+            self.workers,
+            "" if self.workers == 1 else "es",
+            self.chunk,
+            "" if self.chunk == 1 else "s",
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is not None:
+            self.abort()
+            return
+        self.close()
+
+    def write(self, frame: np.ndarray) -> None:
+        if self._closed or self._pool is None:
+            raise MediaError("encoder is not running")
+        if frame.dtype != np.uint16 or frame.shape != (self.height, self.width, 3):
+            raise MediaError(
+                f"encoder expected uint16 YUV {self.width}×{self.height}, "
+                f"got {frame.dtype} {getattr(frame, 'shape', None)}"
+            )
+        self._buffer.append(frame)
+        if len(self._buffer) >= self.chunk:
+            self._submit(self._buffer)
+            self._buffer = []
+        self._reap(block=False)
+        while len(self._pending) >= self.workers:
+            self._reap(block=True)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._buffer:
+                self._submit(self._buffer)
+                self._buffer = []
+            if not self._parts:
+                raise MediaError("encoder received no frames")
+            while self._pending:
+                self._reap(block=True)
+            self._mux()
+        finally:
+            if self._pool is not None:
+                self._pool.shutdown(wait=True, cancel_futures=True)
+                self._pool = None
+            if self._temp is not None:
+                self._temp.cleanup()
+                self._temp = None
+
+    def abort(self) -> None:
+        self._closed = True
+        self._failed = True
+        with self._proc_lock:
+            procs = list(self._procs)
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+        if self._temp is not None:
+            self._temp.cleanup()
+            self._temp = None
+
+    def _submit(self, frames: list[np.ndarray]) -> None:
+        assert self._temp is not None and self._pool is not None
+        payload = b"".join(interleaved_to_planar_bytes(frame) for frame in frames)
+        path = Path(self._temp.name) / f"part_{len(self._parts):05d}.mov"
+        self._parts.append(path)
+        future = self._pool.submit(self._encode_part, payload, path)
+        self._pending.append((future, len(frames)))
+
+    def _reap(self, block: bool) -> None:
+        while self._pending and (block or self._pending[0][0].done()):
+            future, count = self._pending.pop(0)
+            future.result()
+            self.frames_written += count
+            if self.on_encoded is not None:
+                self.on_encoded(count)
+            block = False
+
+    def _encode_part(self, payload: bytes, path: Path) -> None:
+        rate = f"{self.fps.numerator}/{self.fps.denominator}"
+        cmd = [
+            self.ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            PROCESS_PIX_FMT,
+            "-s",
+            f"{self.width}x{self.height}",
+            "-r",
+            rate,
+        ]
+        cmd += _color_flag_args(self.info)
+        cmd += [
+            "-i",
+            "pipe:0",
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            str(self.profile),
+            "-pix_fmt",
+            self.pix_fmt,
+            "-vendor",
+            "apl0",
+            "-alpha_bits",
+            "0",
+        ]
+        for flag, value in _color_output_flags(self.info):
+            cmd += [flag, value]
+        cmd.append(str(path))
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        with self._proc_lock:
+            self._procs.append(proc)
+        try:
+            _stdout, stderr = proc.communicate(payload)
+        finally:
+            with self._proc_lock:
+                if proc in self._procs:
+                    self._procs.remove(proc)
+        if proc.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise MediaError(f"ffmpeg chunk encode failed ({proc.returncode}): {detail or 'no stderr'}")
+
+    def _mux(self) -> None:
+        assert self._temp is not None
+        list_path = Path(self._temp.name) / "parts.txt"
+        lines = ["ffconcat version 1.0"]
+        for part in self._parts:
+            escaped = part.resolve().as_posix().replace("'", r"'\''")
+            lines.append(f"file '{escaped}'")
+        list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        cmd = [
+            self.ffmpeg,
+            "-y" if self.overwrite else "-n",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+        ]
+        if self.start_frame or self.frame_count is not None:
+            start = Fraction(self.start_frame) / self.fps
+            cmd += ["-ss", _format_seconds(start)]
+            if self.frame_count is not None:
+                cmd += ["-t", _format_seconds(Fraction(self.frame_count) / self.fps)]
+        cmd += ["-i", str(self.source)]
+        cmd += [
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a?",
+            "-map_metadata",
+            "1:g",
+            "-c",
+            "copy",
+        ]
+        if self.timecode:
+            cmd += ["-timecode", self.timecode]
+        for flag, value in _color_output_flags(self.info):
+            cmd += [flag, value]
+        cmd.append(str(self.output))
+        log.debug("mux command: %s", _format_cmd(cmd))
+        completed = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            if self.output.exists():
+                self.output.unlink()
+            detail = completed.stderr.strip() or "no stderr"
+            raise MediaError(f"ffmpeg could not join the ProRes chunks ({completed.returncode}): {detail}")
 
 
 def require_prores(info: MediaInfo) -> None:
