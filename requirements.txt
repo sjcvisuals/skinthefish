@@ -1,0 +1,4 @@
+# Runtime for the CPU pipeline. FFmpeg 6+ is a system package, not a pip wheel:
+#   sudo apt-get install ffmpeg
+numpy>=1.26
+opencv-python-headless>=4.9

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skinthefish</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #121417;
+      --panel: #1c2026;
+      --line: #2c333c;
+      --text: #f2f4f7;
+      --muted: #a7b0bb;
+      --accent: #8fd18a;
+      --warn: #e2b657;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.4 "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header, main, footer { padding: 16px 20px; }
+    header {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { font-size: 20px; margin: 0; font-weight: 650; }
+    button, input, select {
+      font: inherit;
+      color: var(--text);
+      background: #111418;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    button { cursor: pointer; background: #262c34; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary { background: var(--accent); color: #10210f; border-color: transparent; font-weight: 650; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .grow { flex: 1; min-width: 180px; }
+    .clip { color: var(--muted); }
+    .banner {
+      display: none;
+      margin: 12px 20px 0;
+      padding: 10px 12px;
+      background: #3a2e14;
+      border: 1px solid var(--warn);
+      border-radius: 8px;
+    }
+    .views {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr;
+      gap: 16px;
+    }
+    figure {
+      margin: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    figcaption {
+      padding: 10px 12px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+    }
+    img { display: block; width: 100%; background: #000; min-height: 180px; }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
+    label input, label select { width: 100%; }
+    .nudge { display: flex; gap: 6px; }
+    .nudge input { flex: 1; }
+    .export {
+      margin-top: 16px;
+      padding: 14px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .status { min-height: 1.4em; color: var(--muted); }
+    .status.ready { color: var(--accent); }
+    .status.bad { color: #ffb4a8; }
+    @media (max-width: 900px) {
+      .views, .controls { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Skinthefish</h1>
+    <button id="open" type="button">Open clip</button>
+    <input id="path" class="grow" type="text" placeholder="Paste the full path to a ProRes .mov" spellcheck="false">
+    <div class="clip" id="clip">No clip open</div>
+  </header>
+  <div class="banner" id="banner"></div>
+  <main>
+    <div class="views">
+      <figure>
+        <figcaption>Original. Green is the horizon, yellow is the 250° edge.</figcaption>
+        <img id="source" alt="Original frame">
+      </figure>
+      <figure>
+        <figcaption>Unwrap preview. Export stays off until this picture is showing.</figcaption>
+        <img id="unwrap" alt="Unwrapped preview">
+      </figure>
+    </div>
+    <div class="controls">
+      <label>Frame
+        <input id="frame" type="range" min="0" max="0" value="0">
+      </label>
+      <label>Center X
+        <span class="nudge"><button type="button" data-nudge="center_x" data-step="-1">−</button><input id="center_x" type="number" step="0.5"><button type="button" data-nudge="center_x" data-step="1">+</button></span>
+      </label>
+      <label>Center Y
+        <span class="nudge"><button type="button" data-nudge="center_y" data-step="-1">−</button><input id="center_y" type="number" step="0.5"><button type="button" data-nudge="center_y" data-step="1">+</button></span>
+      </label>
+      <label>Circle radius
+        <span class="nudge"><button type="button" data-nudge="radius" data-step="-1">−</button><input id="radius" type="number" step="0.5"><button type="button" data-nudge="radius" data-step="1">+</button></span>
+      </label>
+      <label>Yaw degrees
+        <input id="yaw" type="number" step="1" value="0">
+      </label>
+      <label>Delivery
+        <select id="size">
+          <option value="8k">8K · 7680×4320</option>
+          <option value="16k">16K · 15360×8640</option>
+        </select>
+      </label>
+      <label>Rings
+        <select id="rings">
+          <option value="1">Show on the original</option>
+          <option value="0">Hide</option>
+        </select>
+      </label>
+    </div>
+    <section class="export">
+      <div class="row">
+        <label class="grow">ProRes codec
+          <select id="profile">
+            <option value="match">Same as the source</option>
+            <option value="proxy">ProRes 422 Proxy</option>
+            <option value="lt">ProRes 422 LT</option>
+            <option value="422">ProRes 422</option>
+            <option value="hq">ProRes 422 HQ</option>
+            <option value="4444">ProRes 4444</option>
+            <option value="4444xq">ProRes 4444 XQ</option>
+          </select>
+        </label>
+        <label class="grow">Export to
+          <input id="output" type="text" placeholder="Choose where to save the .mov" spellcheck="false">
+        </label>
+        <button id="save" type="button">Browse</button>
+        <button id="export" class="primary" type="button" disabled>Export</button>
+      </div>
+      <p class="status" id="status">Open a clip. The unwrap preview has to appear before Export turns on.</p>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let clip = null;
+    let previewToken = 0;
+    let previewReady = false;
+    let timer = 0;
+
+    function setStatus(text, kind) {
+      const node = $("status");
+      node.textContent = text;
+      node.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function settings() {
+      return {
+        path: $("path").value.trim(),
+        frame: $("frame").value,
+        center_x: $("center_x").value,
+        center_y: $("center_y").value,
+        radius: $("radius").value,
+        yaw: $("yaw").value,
+        size: $("size").value,
+        rings: $("rings").value,
+        profile: $("profile").value,
+        output: $("output").value.trim()
+      };
+    }
+
+    function lockExport(reason) {
+      previewReady = false;
+      $("export").disabled = true;
+      if (reason) setStatus(reason, "");
+    }
+
+    function query(extra) {
+      const params = new URLSearchParams(Object.assign(settings(), extra || {}));
+      return params.toString();
+    }
+
+    async function post(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "request failed");
+      return payload;
+    }
+
+    function loadImage(img, url, token) {
+      return new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("the preview image failed"));
+        img.src = url + "&t=" + token;
+      });
+    }
+
+    async function refresh() {
+      if (!clip) return;
+      const token = ++previewToken;
+      lockExport("Drawing the unwrap…");
+      const q = query();
+      try {
+        await loadImage($("source"), "/api/source.jpg?" + q, token);
+        if (token !== previewToken) return;
+        await loadImage($("unwrap"), "/api/unwrap.jpg?" + q, token);
+        if (token !== previewToken) return;
+        previewReady = true;
+        $("export").disabled = false;
+        const size = $("size").value === "16k" ? "15360×8640" : "7680×4320";
+        setStatus("Preview is ready. Export writes the full " + size + " ProRes file.", "ready");
+      } catch (error) {
+        if (token !== previewToken) return;
+        lockExport(error.message);
+        setStatus(error.message, "bad");
+      }
+    }
+
+    function schedule() {
+      lockExport("Settings changed. The preview is updating.");
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 250);
+    }
+
+    async function openPath(path) {
+      $("path").value = path;
+      clip = await post("/api/open", { path });
+      $("center_x").value = clip.center_x;
+      $("center_y").value = clip.center_y;
+      $("radius").value = clip.radius;
+      $("yaw").value = clip.yaw_offset;
+      $("frame").max = String(Math.max(0, clip.frame_count - 1));
+      $("frame").value = "0";
+      const match = $("profile").options[0];
+      match.textContent = "Same as the source (" + clip.profile_label + ")";
+      const where = clip.square
+        ? "Square circle window. Center starts in the middle of the frame."
+        : "Full-sensor defaults. Move the center if the yellow ring misses the circle.";
+      $("clip").textContent = clip.width + "×" + clip.height + "  " + clip.profile_label + "  " + clip.frame_count + " frames. " + where;
+      if (!$("output").value) {
+        const stem = path.replace(/\.[^.]+$/, "");
+        $("output").value = stem + "_" + $("size").value + ".mov";
+      }
+      await refresh();
+    }
+
+    $("open").onclick = async () => {
+      try {
+        const picked = await post("/api/browse", { kind: "open" });
+        await openPath(picked.path);
+      } catch (error) {
+        setStatus(error.message + " You can paste a path and press Enter.", "bad");
+      }
+    };
+    $("path").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && $("path").value.trim()) {
+        openPath($("path").value.trim()).catch((error) => setStatus(error.message, "bad"));
+      }
+    });
+    $("save").onclick = async () => {
+      try {
+        const picked = await post("/api/browse", { kind: "save", suggested: $("output").value });
+        $("output").value = picked.path;
+      } catch (error) {
+        setStatus(error.message, "bad");
+      }
+    };
+    ["frame", "center_x", "center_y", "radius", "yaw", "size", "rings"].forEach((id) => {
+      $(id).addEventListener("input", schedule);
+      $(id).addEventListener("change", schedule);
+    });
+    document.querySelectorAll("[data-nudge]").forEach((button) => {
+      button.onclick = () => {
+        const input = $(button.dataset.nudge);
+        input.value = String(Number(input.value || 0) + Number(button.dataset.step));
+        schedule();
+      };
+    });
+    $("size").addEventListener("change", () => {
+      const path = $("path").value.trim();
+      if (!path) return;
+      const stem = path.replace(/\.[^.]+$/, "");
+      $("output").value = stem + "_" + $("size").value + ".mov";
+    });
+    $("export").onclick = async () => {
+      if (!previewReady) return;
+      $("export").disabled = true;
+      try {
+        await post("/api/export", settings());
+        const poll = async () => {
+          const job = await (await fetch("/api/job")).json();
+          if (job.state === "running") {
+            setStatus(job.message || "Exporting…");
+            setTimeout(poll, 500);
+            return;
+          }
+          if (job.state === "error") {
+            setStatus(job.error || "Export failed.", "bad");
+            $("export").disabled = false;
+            return;
+          }
+          setStatus(job.message || "Export finished.", "ready");
+          $("export").disabled = false;
+        };
+        poll();
+      } catch (error) {
+        setStatus(error.message, "bad");
+        $("export").disabled = false;
+      }
+    };
+
+    fetch("/api/health").then((response) => response.json()).then((health) => {
+      if (!health.ffmpeg) {
+        $("banner").style.display = "block";
+        $("banner").textContent = health.message;
+      }
+      if (health.initial_path) openPath(health.initial_path).catch((error) => setStatus(error.message, "bad"));
+    });
+  </script>
+</body>
+</html>
