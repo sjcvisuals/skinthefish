@@ -5,8 +5,9 @@ pointing straight up. The optical axis is the zenith (polar angle 0). The
 recorded circle covers 250° of field of view, which is polar angle 0° at the
 center through 125° at the circle edge (35° below the horizon).
 
-The delivery raster is 15360×8640, exactly 16:9, four times UHD 3840×2160.
-The captured polar range fills that frame. There is no black pad.
+The delivery raster is 16:9 and filled by the captured polar range. There is
+no black pad. ``16k`` is 15360×8640 (four times UHD). ``8k`` is 7680×4320
+(two times UHD). Both use the same Lanczos scale, about 195.7%.
 """
 
 from __future__ import annotations
@@ -37,18 +38,26 @@ DEFAULT_THETA_MAX_DEG = 125.0
 HORIZON_THETA_DEG = 90.0
 HORIZON_FRACTION = HORIZON_THETA_DEG / DEFAULT_THETA_MAX_DEG  # 0.72
 
-# 16:9 delivery. 15360×8640 is four times UHD (3840×2160). Both sides
-# divide by 16, so ProRes macroblocks line up and nothing is padded.
+# 16:9 delivery. Both sides divide by 16, so ProRes macroblocks line up
+# and nothing is padded. 16K is four times UHD; 8K is two times UHD.
 UHD_WIDTH = 15360
 UHD_HEIGHT = 8640
+EIGHTK_WIDTH = 7680
+EIGHTK_HEIGHT = 4320
 UHD_ASPECT_W = 16
 UHD_ASPECT_H = 9
 MAX_POLAR_ANGLE_DEG = 180.0
+DELIVERY_SIZES = ("16k", "8k")
 
-# Working resolution before the ~195.7% upscale onto 15360×8640.
-# Height is round(7850 × 9/16) so the unwrap has the same 16:9 shape.
+# Working resolution before the ~195.7% Lanczos resize.
+# 8K is half of 16K on both the unwrap and the delivery, so the scale matches.
+# Heights are the 16:9 partners of those widths (round(7850 × 9/16) = 4416).
 NATIVE_WIDTH = 7850
 NATIVE_HEIGHT = 4416
+_RASTERS = {
+    "16k": (UHD_WIDTH, UHD_HEIGHT, NATIVE_WIDTH, NATIVE_HEIGHT),
+    "8k": (EIGHTK_WIDTH, EIGHTK_HEIGHT, NATIVE_WIDTH // 2, NATIVE_HEIGHT // 2),
+}
 
 _CALIBRATION_FIELDS = (
     "center_x",
@@ -146,6 +155,7 @@ class RasterSpec:
     delivery_height: int
     preview_scale: int
     theta_max_deg: float
+    size: str
 
     @property
     def upscale_x(self) -> float:
@@ -156,27 +166,35 @@ class RasterSpec:
         return self.delivery_height / self.native_height
 
 
-def delivery_raster(theta_max_deg: float = DEFAULT_THETA_MAX_DEG, preview_scale: int = 1) -> RasterSpec:
+def delivery_raster(
+    theta_max_deg: float = DEFAULT_THETA_MAX_DEG,
+    preview_scale: int = 1,
+    size: str = "16k",
+) -> RasterSpec:
     """Build the unwrap and delivery sizes.
 
     The frame is always 16:9. ``theta_max_deg`` does not change the pixel
     size; it is the polar angle that the full frame height represents.
-    Preview scales shrink the master and snap the width to a multiple of 16
-    so the 16:9 height stays exact.
+    ``size`` selects the 15360×8640 master or the 7680×4320 master. Preview
+    scales shrink that master and snap the width to a multiple of 16 so the
+    16:9 height stays exact.
     """
+    if size not in _RASTERS:
+        raise GeometryError(f"size must be one of {DELIVERY_SIZES}, got {size!r}")
     if preview_scale < 1:
         raise GeometryError(f"preview_scale must be >= 1, got {preview_scale}")
     if not 0 < theta_max_deg <= MAX_POLAR_ANGLE_DEG:
         raise GeometryError(
             f"theta_max_deg must be in (0, 180], got {theta_max_deg}"
         )
+    master_w, master_h, native_master_w, native_master_h = _RASTERS[size]
     if preview_scale == 1:
-        delivery_w, delivery_h = UHD_WIDTH, UHD_HEIGHT
-        native_w, native_h = NATIVE_WIDTH, NATIVE_HEIGHT
+        delivery_w, delivery_h = master_w, master_h
+        native_w, native_h = native_master_w, native_master_h
     else:
-        delivery_w = max(16, int(round(UHD_WIDTH / preview_scale / 16.0)) * 16)
+        delivery_w = max(16, int(round(master_w / preview_scale / 16.0)) * 16)
         delivery_h = delivery_w * UHD_ASPECT_H // UHD_ASPECT_W
-        native_w = max(16, round_half_up(NATIVE_WIDTH / preview_scale))
+        native_w = max(16, round_half_up(native_master_w / preview_scale))
         native_h = max(8, round_half_up(delivery_h * native_w / delivery_w))
     if delivery_w * UHD_ASPECT_H != delivery_h * UHD_ASPECT_W:
         raise GeometryError(
@@ -193,6 +211,7 @@ def delivery_raster(theta_max_deg: float = DEFAULT_THETA_MAX_DEG, preview_scale:
         delivery_height=delivery_h,
         preview_scale=preview_scale,
         theta_max_deg=theta_max_deg,
+        size=size,
     )
 
 
@@ -276,26 +295,53 @@ def save_lens_json(path: Path, lens: LensModel, notes: str | None = None) -> Non
 
 
 def autoscale_default_lens(lens: LensModel, width: int, height: int) -> LensModel:
-    """Scale the factory KOMODO defaults when the file is a uniform proxy.
+    """Place the factory circle on a full sensor frame, a proxy, or a square window.
 
-    A half-resolution 3072×1620 proxy of the same framing keeps the circle
-    centered if center and radius are halved. Explicit calibration is never
-    passed through this function.
+    A half-resolution 3072×1620 proxy of the 6144×3240 sensor keeps the circle
+    centered if center and radius are halved. A square frame is the 250° circle's
+    bounding window: on the sensor that circle is 3240 px across, so a 3240×3240
+    extract is centered at (1620, 1620) with radius 1620. Explicit calibration
+    is never passed through this function.
     """
     if width == SENSOR_WIDTH and height == SENSOR_HEIGHT:
         return lens
     if width <= 0 or height <= 0:
         raise GeometryError(f"invalid frame size {width}×{height}")
+    if width == height:
+        scale = width / float(SENSOR_HEIGHT)
+        placed = replace(
+            lens,
+            center_x=width / 2.0,
+            center_y=height / 2.0,
+            radius=DEFAULT_RADIUS * scale,
+        )
+        log.info(
+            "input is %dx%d, a square window of the 250° circle "
+            "(that circle is %d px across on the KOMODO). "
+            "Using center (%.1f, %.1f) and radius %.1f. Confirm with --calibrate.",
+            width,
+            height,
+            SENSOR_HEIGHT,
+            placed.center_x,
+            placed.center_y,
+            placed.radius,
+        )
+        return placed
     sx = width / SENSOR_WIDTH
     sy = height / SENSOR_HEIGHT
     if abs(sx - sy) > 1e-3:
         log.warning(
-            "input is %dx%d, not a uniform scale of the KOMODO 6K %dx%d frame; "
-            "default center and radius were left unscaled",
+            "input is %dx%d, not a uniform scale of the KOMODO 6K %dx%d frame "
+            "and not a square circle window; default center (%.1f, %.1f) and "
+            "radius %.1f were left as the full-sensor values. Pass --center-x, "
+            "--center-y, and --radius, or run --calibrate.",
             width,
             height,
             SENSOR_WIDTH,
             SENSOR_HEIGHT,
+            lens.center_x,
+            lens.center_y,
+            lens.radius,
         )
         return lens
     log.info(

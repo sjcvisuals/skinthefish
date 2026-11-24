@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from geometry import (
+    DEFAULT_CENTER_X,
     DEFAULT_RADIUS,
     HORIZON_THETA_DEG,
     NATIVE_WIDTH,
@@ -55,6 +56,19 @@ def test_delivery_raster_is_16_9_with_no_pad():
     assert UHD_HEIGHT == 8640
     assert raster.upscale_x == pytest.approx(15360 / 7850, rel=1e-12)
     assert raster.upscale_y == pytest.approx(8640 / 4416, rel=1e-12)
+    assert raster.size == "16k"
+
+
+def test_8k_raster_is_half_of_16k_with_the_same_scale():
+    raster = delivery_raster(size="8k")
+    assert (raster.native_width, raster.native_height) == (3925, 2208)
+    assert (raster.delivery_width, raster.delivery_height) == (7680, 4320)
+    assert raster.delivery_width * 9 == raster.delivery_height * 16
+    assert raster.delivery_width == 2 * 3840
+    assert raster.delivery_height == 2 * 2160
+    sixteen = delivery_raster()
+    assert raster.upscale_x == pytest.approx(sixteen.upscale_x, rel=1e-12)
+    assert raster.upscale_y == pytest.approx(sixteen.upscale_y, rel=1e-12)
 
 
 def test_preview_scale_keeps_exact_16_9():
@@ -123,8 +137,16 @@ def test_proxy_frame_scales_the_default_lens_only():
     assert scaled.center_x == pytest.approx(1536.0)
     assert scaled.center_y == pytest.approx(810.0)
     assert scaled.radius == pytest.approx(810.0)
-    weird = autoscale_default_lens(LensModel(), 1000, 1000)
-    assert weird.radius == pytest.approx(DEFAULT_RADIUS)
+    square = autoscale_default_lens(LensModel(), 3240, 3240)
+    assert square.center_x == pytest.approx(1620.0)
+    assert square.center_y == pytest.approx(1620.0)
+    assert square.radius == pytest.approx(1620.0)
+    half_square = autoscale_default_lens(LensModel(), 1620, 1620)
+    assert half_square.center_x == pytest.approx(810.0)
+    assert half_square.radius == pytest.approx(810.0)
+    odd = autoscale_default_lens(LensModel(), 4000, 2000)
+    assert odd.center_x == pytest.approx(DEFAULT_CENTER_X)
+    assert odd.radius == pytest.approx(DEFAULT_RADIUS)
 
 
 def test_calibration_json_roundtrip(tmp_path):

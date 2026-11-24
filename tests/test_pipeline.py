@@ -339,6 +339,36 @@ def test_flat_color_survives_the_yuv_roundtrip(tmp_path):
     assert int(np.max(np.abs(delta))) == 0
 
 
+def test_size_8k_writes_the_half_uhd_raster(tmp_path):
+    frame = np.full((64, 64, 3), 4000, dtype=np.uint16)
+    source = tmp_path / "square.mov"
+    _encode_prores(source, [frame])
+    output = tmp_path / "square_8k.mov"
+    code = main(
+        [
+            str(source),
+            "-o",
+            str(output),
+            "--size",
+            "8k",
+            "--preview-scale",
+            "32",
+            "--center-x",
+            "32",
+            "--center-y",
+            "32",
+            "--radius",
+            "30",
+        ]
+    )
+    assert code == 0
+    info = probe_media(output)
+    raster = delivery_raster(125.0, preview_scale=32, size="8k")
+    assert (info.width, info.height) == (raster.delivery_width, raster.delivery_height)
+    assert info.width * 9 == info.height * 16
+    assert info.width < delivery_raster(125.0, preview_scale=32, size="16k").delivery_width
+
+
 def test_gui_command_builder():
     from gui import build_command
 
@@ -347,6 +377,7 @@ def test_gui_command_builder():
             "input": "/media/A001.mov",
             "output": "/renders/A001.mov",
             "output_dir": "",
+            "size": "8k",
             "interp": "cubic",
             "center_x": "3071.5",
             "center_y": "",
@@ -360,6 +391,7 @@ def test_gui_command_builder():
         }
     )
     assert command[2] == "/media/A001.mov"
+    assert "--size" in command and "8k" in command
     assert "--output-mode" not in command
     assert "--upscaler" not in command
     assert "--calibrate" in command

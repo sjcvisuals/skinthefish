@@ -2,7 +2,8 @@
 
 The order of work is fixed: probe the source, decode ``yuv444p16le``, remap
 the polar image to the native 16:9 strip, Lanczos-4 upscale that strip to
-15360×8640, and encode the same Apple ProRes profile the file arrived in.
+15360×8640 (``--size 16k``) or 7680×4320 (``--size 8k``), and encode the same
+Apple ProRes profile the file arrived in.
 Nothing is padded with black, and the samples are never converted to RGB.
 
 Run ``python main.py --help`` for the command line. ``python gui.py`` opens
@@ -26,6 +27,7 @@ import cv2
 import numpy as np
 
 from geometry import (
+    DELIVERY_SIZES,
     HORIZON_THETA_DEG,
     SENSOR_HEIGHT,
     SENSOR_WIDTH,
@@ -67,8 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="skinthefish",
         description=(
             "Unwrap RED KOMODO 6K / Entaniya HAL 250 zenith fisheye footage "
-            "into a 16:9 ProRes master (15360×8640). The picture fills the "
-            "frame. Color is not converted or sharpened."
+            "into a 16:9 ProRes master. --size 16k is 15360×8640, --size 8k is "
+            "7680×4320. The picture fills the frame. Color is not converted or sharpened."
         ),
     )
     parser.add_argument("input", nargs="?", type=Path, help="A movie, or a folder of movies.")
@@ -79,9 +81,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for batch outputs. Defaults to each file's own folder.",
     )
     parser.add_argument("--calibration", type=Path, help="Lens JSON. CLI geometry flags override it.")
-    parser.add_argument("--center-x", type=float, help=f"Optical center X. Default {SENSOR_WIDTH / 2:.1f}.")
-    parser.add_argument("--center-y", type=float, help=f"Optical center Y. Default {SENSOR_HEIGHT / 2:.1f}.")
-    parser.add_argument("--radius", type=float, help="Pixel radius of the 250° circle. Default 1620.")
+    parser.add_argument(
+        "--center-x",
+        type=float,
+        help=(
+            "Optical center X. Default 3072 on a 6144×3240 frame, "
+            "or the frame center on a square circle window (1620 on 3240×3240)."
+        ),
+    )
+    parser.add_argument(
+        "--center-y",
+        type=float,
+        help="Optical center Y. Default 1620 on both the full sensor and a 3240×3240 window.",
+    )
+    parser.add_argument(
+        "--radius",
+        type=float,
+        help="Pixel radius of the 250° circle. Default 1620 on a full-resolution plate.",
+    )
     parser.add_argument("--theta-max", type=float, help="Polar angle at the circle edge, degrees. Default 125.")
     parser.add_argument(
         "--yaw-offset",
@@ -98,10 +115,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Kernel for the polar remap. The upscale is always Lanczos-4. Default lanczos4.",
     )
     parser.add_argument(
+        "--size",
+        choices=DELIVERY_SIZES,
+        default="16k",
+        help="Delivery raster. 16k is 15360×8640. 8k is 7680×4320. Same Lanczos scale either way.",
+    )
+    parser.add_argument(
         "--preview-scale",
         type=int,
         default=1,
-        help="Divide the 16K raster by this integer for a look-dev render. 1 is the master.",
+        help="Divide the chosen 8K or 16K raster by this integer for a look-dev render. 1 is the master.",
     )
     parser.add_argument("--start-frame", type=int, default=0, help="Inclusive first frame.")
     parser.add_argument("--end-frame", type=int, help="Exclusive end frame. Default: last frame.")
@@ -175,7 +198,7 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
     for note in delivery_notes(info):
         log.info("%s", note)
     lens = resolve_lens(args, info.width, info.height)
-    raster = delivery_raster(lens.theta_max_deg, args.preview_scale)
+    raster = delivery_raster(lens.theta_max_deg, args.preview_scale, args.size)
     start, end, count = resolve_frame_range(info, args.start_frame, args.end_frame)
     timecode = output_timecode(info, start)
     whole_file = start == 0 and (end is None or end == info.frame_count)
@@ -364,7 +387,7 @@ def describe_job(
             f"upscale Lanczos-4 {raster.upscale_x * 100:.2f}% × {raster.upscale_y * 100:.2f}%"
         ),
         (
-            f"  output {output}  {raster.delivery_width}×{raster.delivery_height}  16:9  "
+            f"  output {output}  {raster.size}  {raster.delivery_width}×{raster.delivery_height}  16:9  "
             f"no pad  profile {profile}  {pix}  vendor apl0  yuv444p16 working"
         ),
     ]
@@ -427,7 +450,7 @@ def movie_output_path(source: Path, args: argparse.Namespace, count: int) -> Pat
             raise MediaError("use --output-dir when rendering more than one movie")
         return args.output
     directory = args.output_dir if args.output_dir is not None else source.parent
-    suffix = "_uhd"
+    suffix = f"_{args.size}"
     if args.preview_scale != 1:
         suffix += f"_preview{args.preview_scale}"
     return directory / f"{source.stem}{suffix}.mov"

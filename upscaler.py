@@ -1,7 +1,8 @@
 """Upscale the native equirectangular strip to the 16:9 UHD raster.
 
-The master scale is Lanczos-4 (``INTER_LANCZOS4``), about 195.7% on each axis:
-7850×4416 becomes 15360×8640. The resize is wrapped horizontally so the
+The master scale is Lanczos-4 (``INTER_LANCZOS4``), about 195.7% on each axis.
+``--size 16k`` takes 7850×4416 to 15360×8640. ``--size 8k`` takes 3925×2208 to
+7680×4320. The resize is wrapped horizontally so the
 Lanczos kernel at the 0°/360° seam reads real pixels from the other side.
 There is no unsharp mask and no neural model in this path. Both of those
 rewrite sample values; Lanczos only interpolates them.

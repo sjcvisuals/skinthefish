@@ -2,7 +2,12 @@
 
 Unwrap circular 250° fisheye plates from a RED KOMODO 6K with an Entaniya HAL 250 3.6 mm lens, mounted vertically and aimed at the zenith, into a 360° equirectangular ProRes master.
 
-The delivery raster is always 15360×8640. That is exactly 16:9, and it is four times UHD (3840×2160). The captured polar range fills the frame. There is no black bar and no letterbox.
+The delivery raster is 16:9, and the captured polar range fills the frame. There is no black bar and no letterbox.
+
+| `--size` | Delivery | Unwrap, then Lanczos-4 |
+| --- | --- | --- |
+| `16k` (default) | 15360×8640, four times UHD | 7850×4416, then about 195.7% |
+| `8k` | 7680×4320, two times UHD | 3925×2208, then the same 195.7% |
 
 The picture is processed as `yuv444p16le`. That is a higher-precision copy of the source YUV codes, not a conversion to RGB. Nothing is graded, sharpened, or range-lifted. The only thing that changes a sample is geometric resampling.
 
@@ -12,9 +17,10 @@ The KOMODO active picture is 6144×3240 (27.03×14.26 mm, 4.4 μm). The HAL 250 
 
 | | |
 | --- | --- |
-| Optical center | `(3072, 1620)` |
+| Optical center, full 6144×3240 frame | `(3072, 1620)` |
+| Optical center, 3240×3240 circle window | `(1620, 1620)` |
 | 250° circle radius | `1620 px` (polar angle 125°) |
-| Horizon (90° polar, 180° across) | `1166.4 px`, which is 72% of the way down the frame |
+| Horizon (90° polar, 180° across) | `1166.4 px` on a full-resolution plate, which is 72% of the way down the frame |
 
 Azimuth `φ` runs across the panorama from `−π` at the left edge to just under `+π` at the right edge. Polar angle `θ` runs from 0° (zenith) at the top of the frame to 125° at the bottom. Positive `--yaw-offset` rotates the view clockwise in the sensor image, so the content of the panorama moves left. Yaw 0 puts the top of the sensor (the direction above the optical center) in the middle of the frame.
 
@@ -35,16 +41,16 @@ The 125° capture is stretched to fill 16:9. A square-pixel 2:1 latlong would le
 Two Lanczos-4 resamples, and nothing else.
 
 1. `cv2.remap` builds the equirectangular picture at 7850×4416. The kernel is Lanczos-4 (`--interp lanczos4`, the default) or cubic (`--interp cubic`). This step samples the fisheye. It is not the upscale.
-2. `cv2.resize` with `INTER_LANCZOS4` scales that strip onto 15360×8640.
+2. `cv2.resize` with `INTER_LANCZOS4` scales that strip onto the chosen delivery size.
 
-The scale is the same on both axes, about 195.7%:
+`--size 16k` uses the numbers below. `--size 8k` halves every one of them, so the scale factor stays the same.
 
 | Axis | From | To | Factor |
 | --- | --- | --- | --- |
 | Width | 7850 | 15360 | 1.9566879 (195.67%) |
 | Height | 4416 | 8640 | 1.9565217 (195.65%) |
 
-4416 is `round(7850 × 9/16)`, so the working frame is already 16:9. 8640 is exactly `15360 × 9/16`. The two factors differ only because both heights are integers.
+4416 is `round(7850 × 9/16)`, so the working frame is already 16:9. 8640 is exactly `15360 × 9/16`. The two factors differ only because both heights are integers. 8K is 3925×2208 resized to 7680×4320.
 
 Before the resize, the strip is padded by copying the opposite horizontal edge, using a pad width that lands the crop on a whole pixel. The Lanczos kernel at the 0°/360° seam therefore reads real neighbors, and the pad is cropped off afterward. The remap itself does not wrap vertically: the zenith has no opposite edge to copy.
 
@@ -84,7 +90,7 @@ python3 -m pip install -r requirements.txt
 
 On Debian and Ubuntu the `ffmpeg` package includes `prores_ks`. The GUI needs a display and `python3-tk`.
 
-A full 15360×8640 `yuv444p16` frame is about 760 MB before encoder scratch. Expect several gigabytes of RAM per frame. Use `--preview-scale` for look-dev.
+A full 15360×8640 `yuv444p16` frame is about 760 MB before encoder scratch. An 8K frame is a quarter of that, about 190 MB. Expect several gigabytes of RAM for 16K. Use `--size 8k` or `--preview-scale` for the first look.
 
 ## Commands
 
@@ -94,14 +100,17 @@ Calibrate the circle before a batch. This writes a PNG (green = 90° horizon, ye
 python3 main.py /media/A001_C001.mov --calibrate
 ```
 
-Nudge center and radius until the yellow ring sits on the image circle, then render. Positive yaw turns the view clockwise. The output is `{name}_uhd.mov` when you do not pass `-o`.
+Nudge center and radius until the yellow ring sits on the image circle, then render. Positive yaw turns the view clockwise. With no `-o`, the output is `{name}_16k.mov` or `{name}_8k.mov`.
+
+A 3240×3240 file is treated as the circle's bounding square. The default center is then `(1620, 1620)` and the radius is `1620`, which is the full-sensor circle with the side margins cropped away. `--dry-run` prints that assumption. The yellow ring on the calibration still is the check.
 
 ```bash
 python3 main.py /media/A001_C001.mov \
   --center-x 3071.5 --center-y 1618.0 --radius 1616.0 \
   --yaw-offset 90 \
   --calibration examples/lens_calibration.example.json \
-  -o /renders/A001_C001_uhd.mov
+  --size 16k \
+  -o /renders/A001_C001_16k.mov
 ```
 
 Batch a folder. Every file becomes a 16:9 master in the output folder.
@@ -112,11 +121,65 @@ python3 main.py /media/day01/ \
   --overwrite
 ```
 
-Quarter-resolution look-dev, still 16:9, still Lanczos-4:
+Quarter-resolution look-dev of the 8K raster, still 16:9, still Lanczos-4:
 
 ```bash
-python3 main.py clip.mov --preview-scale 4 -o /tmp/lookdev.mov
+python3 main.py clip.mov --size 8k --preview-scale 4 -o /tmp/lookdev.mov
 ```
+
+## Test on Windows
+
+The input has to already be Apple ProRes. A 3240×3240 RED export that is H.264, a still sequence, or an R3D will be refused. Export ProRes in the flavor you want back (422 HQ is the usual one), then unwrap.
+
+1. Install Python 3.11 or 3.12 from [python.org](https://www.python.org/downloads/windows/). On the first installer page, turn on **Add python.exe to PATH**. The standard installer includes Tk, which the optional GUI needs.
+2. Install FFmpeg with a build that contains `prores_ks`. In PowerShell:
+
+```powershell
+winget install Gyan.FFmpeg
+```
+
+Close the terminal, open a new one, and check:
+
+```powershell
+ffmpeg -hide_banner -encoders | findstr prores_ks
+ffprobe -version
+```
+
+If `winget` is not available, download the essentials build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), unzip it, and add its `bin` folder to PATH.
+
+3. In a terminal, from the folder that contains `main.py`:
+
+```powershell
+py -3 -m pip install -r requirements.txt
+ffprobe -hide_banner C:\media\clip.mov
+py -3 main.py C:\media\clip.mov --dry-run --size 8k
+```
+
+`ffprobe` should show `3240x3240` and `prores`. The dry run should show center `(1620.000, 1620.000)`, radius `1620.000`, and output `7680×4320`. It does not write a movie.
+
+4. Write the calibration still and open the PNG. The yellow ring should sit on the edge of the fisheye circle, and the white crosshair on its center. If the ring is inset or off-center, the square was not a tight crop. Measure the real center and radius and pass them on the next command.
+
+```powershell
+py -3 main.py C:\media\clip.mov --calibrate
+```
+
+5. Render a short look before a full file. This writes eight frames at a quarter of 8K:
+
+```powershell
+py -3 main.py C:\media\clip.mov --size 8k --preview-scale 4 --end-frame 8 -o C:\media\look.mov
+ffprobe -hide_banner C:\media\look.mov
+```
+
+The picture size should be 16:9, the ProRes profile and timecode should match the source, and the horizon should sit about 72% of the way down the frame.
+
+6. Render the master you want. 8K is the practical first full pass. 16K needs several gigabytes free per frame.
+
+```powershell
+py -3 main.py C:\media\clip.mov --size 8k -o C:\media\clip_8k.mov
+py -3 main.py C:\media\clip.mov --size 16k -o C:\media\clip_16k.mov
+```
+
+On macOS the same commands work with `python3` after `brew install ffmpeg python`. There is no Windows-only or Mac-only path in the tool.
 
 Useful flags: `--interp cubic` (the remap kernel only; the upscale stays Lanczos-4), `--start-frame`, `--end-frame`, `--dry-run`, `-v`. A half-res 3072×1620 proxy of the same framing scales the default center and radius automatically. An explicit center, radius, or calibration file is used as written.
 
@@ -139,7 +202,7 @@ Limits, so they are not a surprise on a render node:
 
 - `prores_ks` accepts 10-bit pixel formats. 4444 files probe back as `yuv444p12le` because the codec codeword is 12 bits wide; the extra two bits are not stored. The remap still runs in 16-bit YUV, so nothing is quantized to 8-bit on the way through.
 - Alpha on 4444 is dropped. The picture stays YUV.
-- Width and height are stored as 16-bit fields (maximum 65535), and 4:2:2 needs an even width. 15360×8640 divides by 16 on both sides. On FFmpeg 6.1, `prores_ks` encoded 15360×7680 and a piped 15360×5333 HQ frame and probed them back unchanged. 8640 is aligned the same way.
+- Width and height are stored as 16-bit fields (maximum 65535), and 4:2:2 needs an even width. 15360×8640 and 7680×4320 both divide by 16. On FFmpeg 6.1, `prores_ks` encoded 15360×7680 and a piped 15360×5333 HQ frame and probed them back unchanged.
 - The input has to already be ProRes. The tool will not invent a profile for H.264 or a camera raw file.
 
 ## Layout
@@ -160,4 +223,4 @@ python3 -m pip install -r requirements-dev.txt
 python3 -m pytest
 ```
 
-The geometry tests lock the 1166.4 px horizon and the 7850×4416 to 15360×8640 rasters. The pipeline tests encode a short ProRes fixture with ffmpeg and check profile, timecode, color tags, audio, that a horizon marker lands in the center of the panorama, and that a flat color comes back with the same YUV codes.
+The geometry tests lock the 1166.4 px horizon, the 3240×3240 circle window, and both the 15360×8640 and 7680×4320 rasters. The pipeline tests encode a short ProRes fixture with ffmpeg and check profile, timecode, color tags, audio, that a horizon marker lands in the center of the panorama, and that a flat color comes back with the same YUV codes.

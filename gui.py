@@ -27,6 +27,7 @@ def build_command(values: dict[str, str], python: str | None = None) -> list[str
     output_dir = values.get("output_dir", "").strip()
     if output_dir:
         command += ["--output-dir", output_dir]
+    command += ["--size", values.get("size") or "16k"]
     command += ["--interp", values.get("interp") or "lanczos4"]
     for flag, key in (
         ("--center-x", "center_x"),
@@ -64,6 +65,7 @@ def launch(args: argparse.Namespace | None = None) -> None:
         "input": tk.StringVar(value=str(args.input) if args and args.input else ""),
         "output": tk.StringVar(value=str(args.output) if args and args.output else ""),
         "output_dir": tk.StringVar(value=str(args.output_dir) if args and args.output_dir else ""),
+        "size": tk.StringVar(value=getattr(args, "size", "16k") or "16k"),
         "interp": tk.StringVar(value=getattr(args, "interp", "lanczos4")),
         "center_x": tk.StringVar(value=_optional(args, "center_x")),
         "center_y": tk.StringVar(value=_optional(args, "center_y")),
@@ -97,9 +99,11 @@ def launch(args: argparse.Namespace | None = None) -> None:
 
     picks = ttk.Frame(root, padding=(12, 0))
     picks.pack(fill="x")
-    ttk.Label(picks, text="Remap kernel").grid(row=0, column=0, sticky="w")
-    ttk.Combobox(picks, textvariable=fields["interp"], values=("lanczos4", "cubic"), width=10).grid(row=0, column=1, padx=4)
-    ttk.Label(picks, text="Upscale is Lanczos-4 to 16:9. No sharpen, no pad.").grid(row=0, column=2, sticky="w", padx=8)
+    ttk.Label(picks, text="Size").grid(row=0, column=0, sticky="w")
+    ttk.Combobox(picks, textvariable=fields["size"], values=("16k", "8k"), width=8).grid(row=0, column=1, padx=4)
+    ttk.Label(picks, text="Remap kernel").grid(row=0, column=2, sticky="w")
+    ttk.Combobox(picks, textvariable=fields["interp"], values=("lanczos4", "cubic"), width=10).grid(row=0, column=3, padx=4)
+    ttk.Label(picks, text="Lanczos-4, 16:9, no sharpen, no pad.").grid(row=0, column=4, sticky="w", padx=8)
 
     checks = ttk.Frame(root, padding=12)
     checks.pack(fill="x")
