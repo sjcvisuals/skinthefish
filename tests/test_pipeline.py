@@ -104,7 +104,6 @@ def _lens_args(lens: LensModel) -> list[str]:
         str(lens.center_y),
         "--radius",
         str(lens.radius),
-        "--no-unsharp",
     ]
 
 
@@ -138,7 +137,8 @@ def test_preview_render_preserves_prores_and_places_the_front(marked_clip, tmp_p
     assert info.codec_tag == "apch"
     assert info.pix_fmt == "yuv422p10le"
     assert info.width == raster.delivery_width
-    assert info.height == raster.full_height
+    assert info.height == raster.delivery_height
+    assert info.width * 9 == info.height * 16
     assert info.frame_count == 3
     assert info.timecode == "01:00:00:00"
     assert info.color_primaries == "bt2020"
@@ -159,9 +159,7 @@ def test_preview_render_preserves_prores_and_places_the_front(marked_clip, tmp_p
     assert decoded.shape[0] == 3
     row, col = _bright_centroid(decoded[0])
     assert col == pytest.approx(raster.delivery_width / 2, abs=6)
-    assert row == pytest.approx(0.72 * raster.active_height - 0.5, abs=6)
-    # The uncaptured nadir pad is black, below the active strip.
-    assert int(decoded[0, -1].max()) < 50
+    assert row == pytest.approx(0.72 * raster.delivery_height - 0.5, abs=6)
     assert int(decoded[0].max()) > 20000
 
     again = main([str(source), "-o", str(output), "--preview-scale", "16", *_lens_args(lens)])
@@ -198,8 +196,6 @@ def test_active_crop_4444_profile(tmp_path):
             str(source),
             "-o",
             str(output),
-            "--output-mode",
-            "active-crop",
             "--preview-scale",
             "32",
             "--center-x",
@@ -208,7 +204,6 @@ def test_active_crop_4444_profile(tmp_path):
             "32",
             "--radius",
             "30",
-            "--no-unsharp",
         ]
     )
     assert code == 0
@@ -218,7 +213,8 @@ def test_active_crop_4444_profile(tmp_path):
     assert info.codec_tag == "ap4h"
     assert info.pix_fmt in {"yuv444p10le", "yuv444p12le"}
     assert info.width == raster.delivery_width
-    assert info.height == raster.active_height
+    assert info.height == raster.delivery_height
+    assert info.width * 9 == info.height * 16
     assert info.has_audio is False
 
 
@@ -256,8 +252,7 @@ def test_calibrate_writes_overlay_and_sidecar(marked_clip, tmp_path):
     assert int(np.all(image == (0, 220, 0), axis=2).sum()) > 50
 
 
-def test_rejects_non_prores_and_missing_ai_model(marked_clip, tmp_path):
-    source, lens = marked_clip
+def test_rejects_non_prores_and_a_missing_file(tmp_path):
     jpeg = tmp_path / "not_prores.mov"
     subprocess.run(
         [
@@ -279,20 +274,6 @@ def test_rejects_non_prores_and_missing_ai_model(marked_clip, tmp_path):
         check=True,
     )
     assert main([str(jpeg), "-o", str(tmp_path / "out.mov"), "--preview-scale", "32"]) == 1
-    assert (
-        main(
-            [
-                str(source),
-                "--upscaler",
-                "ai",
-                "--dry-run",
-                "--preview-scale",
-                "32",
-                *_lens_args(lens),
-            ]
-        )
-        == 1
-    )
     assert main([str(tmp_path / "missing.mov"), "-o", str(tmp_path / "no.mov")]) == 1
 
 
@@ -323,6 +304,41 @@ def test_batch_dry_run_writes_nothing(tmp_path):
     assert not out.exists() or not any(out.glob("*.mov"))
 
 
+def test_flat_color_survives_the_yuv_roundtrip(tmp_path):
+    """A constant field must come back with the same YUV codes.
+
+    The fixture is encoded from RGB, so the comparison is against the YUV
+    ffmpeg stored, not against the RGB numbers we painted.
+    """
+    frame = np.empty((64, 96, 3), dtype=np.uint16)
+    frame[:] = (18000, 9000, 24000)
+    source = tmp_path / "flat.mov"
+    _encode_prores(source, [frame])
+    output = tmp_path / "flat_uhd.mov"
+    code = main(
+        [
+            str(source),
+            "-o",
+            str(output),
+            "--preview-scale",
+            "32",
+            "--center-x",
+            "48",
+            "--center-y",
+            "32",
+            "--radius",
+            "28",
+        ]
+    )
+    assert code == 0
+    source_yuv = _decode_yuv444p16(source)
+    output_yuv = _decode_yuv444p16(output)
+    reference = source_yuv.reshape(-1, 3)[0].astype(np.int32)
+    assert int(np.max(np.abs(source_yuv.astype(np.int32) - reference))) == 0
+    delta = output_yuv.astype(np.int32) - reference
+    assert int(np.max(np.abs(delta))) == 0
+
+
 def test_gui_command_builder():
     from gui import build_command
 
@@ -331,8 +347,6 @@ def test_gui_command_builder():
             "input": "/media/A001.mov",
             "output": "/renders/A001.mov",
             "output_dir": "",
-            "output_mode": "active-crop",
-            "upscaler": "lanczos",
             "interp": "cubic",
             "center_x": "3071.5",
             "center_y": "",
@@ -340,16 +354,14 @@ def test_gui_command_builder():
             "yaw_offset": "90",
             "theta_max": "",
             "preview_scale": "4",
-            "sr_model": "",
-            "device": "cpu",
             "calibration": "",
             "calibrate": "1",
             "overwrite": "1",
-            "no_unsharp": "0",
         }
     )
     assert command[2] == "/media/A001.mov"
-    assert "--output-mode" in command and "active-crop" in command
+    assert "--output-mode" not in command
+    assert "--upscaler" not in command
     assert "--calibrate" in command
     assert "--overwrite" in command
     assert "--center-y" not in command
@@ -363,6 +375,17 @@ def _bright_centroid(frame: np.ndarray) -> tuple[float, float]:
     ys, xs = np.nonzero(mask)
     weights = peak[ys, xs]
     return float(np.average(ys, weights=weights)), float(np.average(xs, weights=weights))
+
+
+def _decode_yuv444p16(path: Path) -> np.ndarray:
+    info = probe_media(path)
+    raw = subprocess.check_output(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "yuv444p16le", "-"],
+    )
+    frame_bytes = info.width * info.height * 3 * 2
+    count = len(raw) // frame_bytes
+    planes = np.frombuffer(raw, dtype="<u2").reshape(count, 3, info.height, info.width)
+    return np.stack((planes[:, 0], planes[:, 1], planes[:, 2]), axis=-1)
 
 
 def _decode_rgb48(path: Path) -> np.ndarray:

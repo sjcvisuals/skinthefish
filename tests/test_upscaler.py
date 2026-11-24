@@ -41,17 +41,17 @@ def test_wrapped_lanczos_matches_the_periodic_signal_at_the_seam():
 
 def test_lanczos_upscaler_hits_the_requested_size_and_preserves_level():
     image = np.full((20, 32, 3), 20000, dtype=np.uint16)
-    out = LanczosUpscaler(unsharp=False).upscale(image, 64, 36)
+    out = LanczosUpscaler().upscale(image, 64, 36)
     assert out.shape == (36, 64, 3)
     assert out.dtype == np.uint16
     assert abs(int(out[18, 32, 0]) - 20000) < 40
 
 
-def test_unsharp_does_not_leave_the_legal_range():
-    image = _cosine(64, 16)
-    out = LanczosUpscaler(amount=0.8, sigma=0.7, unsharp=True).upscale(image, 96, 24)
-    assert int(out.min()) >= 0
-    assert int(out.max()) <= 65535
+def test_lanczos_of_a_flat_field_does_not_shift_the_code():
+    image = np.full((20, 32, 3), 30080, dtype=np.uint16)
+    out = LanczosUpscaler().upscale(image, 63, 36)
+    assert int(out.min()) == 30080
+    assert int(out.max()) == 30080
 
 
 def test_ai_tiles_wrap_the_seam_and_fit_the_exact_size():

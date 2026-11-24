@@ -11,7 +11,7 @@ from geometry import (
     DEFAULT_RADIUS,
     HORIZON_THETA_DEG,
     NATIVE_WIDTH,
-    UHD_FULL_HEIGHT,
+    UHD_HEIGHT,
     UHD_WIDTH,
     GeometryError,
     LensModel,
@@ -43,29 +43,25 @@ def test_collapsed_polynomial_is_rejected():
         LensModel(k1=-1.0).radius_at_theta(10.0)
 
 
-def test_delivery_raster_matches_the_16k_spec():
+def test_delivery_raster_is_16_9_with_no_pad():
     raster = delivery_raster()
-    assert (raster.native_width, raster.native_height) == (7850, 2726)
-    assert (raster.delivery_width, raster.active_height) == (15360, 5333)
-    assert raster.full_height == 7680
-    assert raster.pad_rows == 2347
-    assert raster.encoded_height("full-latlong") == 7680
-    assert raster.encoded_height("active-crop") == 5333
-    assert UHD_FULL_HEIGHT - 5333 == 2347
+    assert (raster.native_width, raster.native_height) == (7850, 4416)
+    assert (raster.delivery_width, raster.delivery_height) == (15360, 8640)
+    assert raster.delivery_width * 9 == raster.delivery_height * 16
+    assert raster.delivery_width == 4 * 3840
+    assert raster.delivery_height == 4 * 2160
     assert NATIVE_WIDTH == 7850
     assert UHD_WIDTH == 15360
-    # 125/180 of a 2:1 LatLong, and the native height that upscales onto it.
-    assert round(7680 * 125 / 180) == 5333
+    assert UHD_HEIGHT == 8640
     assert raster.upscale_x == pytest.approx(15360 / 7850, rel=1e-12)
-    assert abs(2726 * (15360 / 7850) - 5333) < 1.0
+    assert raster.upscale_y == pytest.approx(8640 / 4416, rel=1e-12)
 
 
-def test_preview_scale_keeps_an_even_width():
+def test_preview_scale_keeps_exact_16_9():
     raster = delivery_raster(preview_scale=16)
-    assert raster.delivery_width % 2 == 0
+    assert raster.delivery_width % 16 == 0
+    assert raster.delivery_width * 9 == raster.delivery_height * 16
     assert raster.delivery_width < 15360
-    assert raster.native_width < 7850
-    assert raster.pad_rows > 0
 
 
 def test_front_direction_straddles_the_center_columns():
@@ -106,13 +102,13 @@ def test_seam_columns_sample_neighboring_azimuths():
 
 def test_master_grid_puts_the_horizon_on_the_spec_radius():
     lens = LensModel()
-    map_x, map_y = build_remap_maps(7850, 2726, lens)
-    assert map_x.shape == (2726, 7850)
+    map_x, map_y = build_remap_maps(7850, 4416, lens)
+    assert map_x.shape == (4416, 7850)
     assert map_x.dtype == np.float32
-    # θ = 90° falls between rows whose centers bracket 0.72 of the strip.
-    target = 0.72 * 2726 - 0.5
+    # θ = 90° falls between rows whose centers bracket 0.72 of the frame.
+    target = 0.72 * 4416 - 0.5
     row = int(math.floor(target))
-    theta = (row + 0.5) / 2726 * 125.0
+    theta = (row + 0.5) / 4416 * 125.0
     radius = float(lens.radius_at_theta(theta))
     col_a, col_b = 3924, 3925  # front straddles the middle of 7850
     mid_x = 0.5 * (float(map_x[row, col_a]) + float(map_x[row, col_b]))

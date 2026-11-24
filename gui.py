@@ -27,8 +27,6 @@ def build_command(values: dict[str, str], python: str | None = None) -> list[str
     output_dir = values.get("output_dir", "").strip()
     if output_dir:
         command += ["--output-dir", output_dir]
-    command += ["--output-mode", values.get("output_mode") or "full-latlong"]
-    command += ["--upscaler", values.get("upscaler") or "lanczos"]
     command += ["--interp", values.get("interp") or "lanczos4"]
     for flag, key in (
         ("--center-x", "center_x"),
@@ -37,8 +35,6 @@ def build_command(values: dict[str, str], python: str | None = None) -> list[str
         ("--yaw-offset", "yaw_offset"),
         ("--theta-max", "theta_max"),
         ("--preview-scale", "preview_scale"),
-        ("--sr-model", "sr_model"),
-        ("--device", "device"),
         ("--calibration", "calibration"),
     ):
         text = values.get(key, "").strip()
@@ -48,8 +44,6 @@ def build_command(values: dict[str, str], python: str | None = None) -> list[str
         command.append("--calibrate")
     if values.get("overwrite") == "1":
         command.append("--overwrite")
-    if values.get("no_unsharp") == "1":
-        command.append("--no-unsharp")
     return command
 
 
@@ -70,8 +64,6 @@ def launch(args: argparse.Namespace | None = None) -> None:
         "input": tk.StringVar(value=str(args.input) if args and args.input else ""),
         "output": tk.StringVar(value=str(args.output) if args and args.output else ""),
         "output_dir": tk.StringVar(value=str(args.output_dir) if args and args.output_dir else ""),
-        "output_mode": tk.StringVar(value=getattr(args, "output_mode", "full-latlong")),
-        "upscaler": tk.StringVar(value=getattr(args, "upscaler", "lanczos")),
         "interp": tk.StringVar(value=getattr(args, "interp", "lanczos4")),
         "center_x": tk.StringVar(value=_optional(args, "center_x")),
         "center_y": tk.StringVar(value=_optional(args, "center_y")),
@@ -79,13 +71,10 @@ def launch(args: argparse.Namespace | None = None) -> None:
         "yaw_offset": tk.StringVar(value=_optional(args, "yaw_offset")),
         "theta_max": tk.StringVar(value=_optional(args, "theta_max")),
         "preview_scale": tk.StringVar(value=str(getattr(args, "preview_scale", 1) or 1)),
-        "sr_model": tk.StringVar(value=str(args.sr_model) if args and args.sr_model else ""),
-        "device": tk.StringVar(value=getattr(args, "device", "cpu")),
         "calibration": tk.StringVar(value=str(args.calibration) if args and args.calibration else ""),
     }
     calibrate = tk.StringVar(value="1" if args and args.calibrate else "0")
     overwrite = tk.StringVar(value="1" if args and args.overwrite else "0")
-    no_unsharp = tk.StringVar(value="1" if args and args.no_unsharp else "0")
 
     form = ttk.Frame(root, padding=12)
     form.pack(fill="x")
@@ -100,7 +89,6 @@ def launch(args: argparse.Namespace | None = None) -> None:
         ("Yaw offset", "yaw_offset"),
         ("Theta max", "theta_max"),
         ("Preview scale", "preview_scale"),
-        ("SR model", "sr_model"),
     ]
     for row, (label, key) in enumerate(rows):
         ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=2)
@@ -109,20 +97,14 @@ def launch(args: argparse.Namespace | None = None) -> None:
 
     picks = ttk.Frame(root, padding=(12, 0))
     picks.pack(fill="x")
-    ttk.Label(picks, text="Mode").grid(row=0, column=0, sticky="w")
-    ttk.Combobox(picks, textvariable=fields["output_mode"], values=("full-latlong", "active-crop"), width=16).grid(row=0, column=1, padx=4)
-    ttk.Label(picks, text="Upscaler").grid(row=0, column=2, sticky="w")
-    ttk.Combobox(picks, textvariable=fields["upscaler"], values=("lanczos", "ai"), width=10).grid(row=0, column=3, padx=4)
-    ttk.Label(picks, text="Remap").grid(row=0, column=4, sticky="w")
-    ttk.Combobox(picks, textvariable=fields["interp"], values=("lanczos4", "cubic"), width=10).grid(row=0, column=5, padx=4)
-    ttk.Label(picks, text="Device").grid(row=0, column=6, sticky="w")
-    ttk.Combobox(picks, textvariable=fields["device"], values=("cpu", "cuda", "auto"), width=8).grid(row=0, column=7, padx=4)
+    ttk.Label(picks, text="Remap kernel").grid(row=0, column=0, sticky="w")
+    ttk.Combobox(picks, textvariable=fields["interp"], values=("lanczos4", "cubic"), width=10).grid(row=0, column=1, padx=4)
+    ttk.Label(picks, text="Upscale is Lanczos-4 to 16:9. No sharpen, no pad.").grid(row=0, column=2, sticky="w", padx=8)
 
     checks = ttk.Frame(root, padding=12)
     checks.pack(fill="x")
     ttk.Checkbutton(checks, text="Calibrate still only", variable=calibrate, onvalue="1", offvalue="0").pack(side="left")
     ttk.Checkbutton(checks, text="Overwrite", variable=overwrite, onvalue="1", offvalue="0").pack(side="left", padx=12)
-    ttk.Checkbutton(checks, text="No unsharp", variable=no_unsharp, onvalue="1", offvalue="0").pack(side="left")
 
     buttons = ttk.Frame(root, padding=(12, 0))
     buttons.pack(fill="x")
@@ -139,7 +121,6 @@ def launch(args: argparse.Namespace | None = None) -> None:
         payload = {key: var.get() for key, var in fields.items()}
         payload["calibrate"] = calibrate.get()
         payload["overwrite"] = overwrite.get()
-        payload["no_unsharp"] = no_unsharp.get()
         try:
             command = build_command(payload)
         except ValueError as exc:

@@ -1,13 +1,10 @@
-"""Upscale the native equirectangular strip to the UHD delivery raster.
+"""Upscale the native equirectangular strip to the 16:9 UHD raster.
 
-The lanczos path is a wrapped Lanczos-4 resize plus a light unsharp mask.
-The horizontal wrap is what keeps the 0°/360° seam from growing a dark or
-bright line: both the resize kernel and the unsharp blur see pixels from the
-other side of the cut.
-
-The AI path runs a user-supplied x2 ONNX or TorchScript model in tiles, with
-the same horizontal wrap, then fits the result to the exact delivery size.
-Weights are not bundled.
+The master scale is Lanczos-4 (``INTER_LANCZOS4``), about 195.7% on each axis:
+7850×4416 becomes 15360×8640. The resize is wrapped horizontally so the
+Lanczos kernel at the 0°/360° seam reads real pixels from the other side.
+There is no unsharp mask and no neural model in this path. Both of those
+rewrite sample values; Lanczos only interpolates them.
 """
 
 from __future__ import annotations
@@ -78,44 +75,12 @@ def resize_wrap_horizontal(
     return np.ascontiguousarray(crop)
 
 
-def unsharp_wrap(image: np.ndarray, sigma: float, amount: float) -> np.ndarray:
-    """Subtle unsharp mask whose blur wraps across the panorama seam."""
-    if amount <= 0 or sigma <= 0:
-        return image
-    pad = max(4, int(math.ceil(sigma * 3.0)))
-    if pad * 2 >= image.shape[1]:
-        pad = max(1, image.shape[1] // 4)
-    padded = np.concatenate([image[:, -pad:], image, image[:, :pad]], axis=1)
-    out = np.empty_like(image)
-    for channel in range(3):
-        plane = padded[:, :, channel].astype(np.float32)
-        blurred = cv2.GaussianBlur(
-            plane,
-            (0, 0),
-            sigmaX=sigma,
-            sigmaY=sigma,
-            borderType=cv2.BORDER_REFLECT_101,
-        )
-        sharpened = plane + np.float32(amount) * (plane - blurred)
-        cropped = np.clip(sharpened[:, pad:-pad], 0, 65535)
-        out[:, :, channel] = cropped.astype(np.uint16)
-    return out
-
-
 @dataclass
 class LanczosUpscaler:
-    """Lanczos-4 upscale to an exact size, then a light unsharp mask."""
-
-    amount: float = 0.25
-    sigma: float = 0.6
-    unsharp: bool = True
+    """Lanczos-4 resize to an exact size. No sharpening and no tone change."""
 
     def upscale(self, frame: np.ndarray, out_width: int, out_height: int) -> np.ndarray:
         resized = resize_wrap_horizontal(frame, out_width, out_height, cv2.INTER_LANCZOS4)
-        if self.unsharp and self.amount > 0 and self.sigma > 0:
-            if resized.dtype != np.uint16:
-                resized = np.clip(resized, 0, 65535).astype(np.uint16)
-            return unsharp_wrap(resized, self.sigma, self.amount)
         if resized.dtype != np.uint16:
             resized = np.clip(np.rint(resized), 0, 65535).astype(np.uint16)
         return resized

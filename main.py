@@ -1,9 +1,9 @@
-"""Unwrap Entaniya HAL 250 zenith fisheye plates to a 16K ProRes equirectangular.
+"""Unwrap Entaniya HAL 250 zenith fisheye plates to a 16:9 ProRes master.
 
-The order of work is fixed: probe the source, decode ``rgb48le``, remap the
-polar image to the native 125° strip, upscale that strip to the UHD raster,
-pad to 2:1 when asked, and encode the same Apple ProRes profile the file
-arrived in.
+The order of work is fixed: probe the source, decode ``yuv444p16le``, remap
+the polar image to the native 16:9 strip, Lanczos-4 upscale that strip to
+15360×8640, and encode the same Apple ProRes profile the file arrived in.
+Nothing is padded with black, and the samples are never converted to RGB.
 
 Run ``python main.py --help`` for the command line. ``python gui.py`` opens
 the small wrapper around the same options.
@@ -27,9 +27,6 @@ import numpy as np
 
 from geometry import (
     HORIZON_THETA_DEG,
-    OUTPUT_ACTIVE_CROP,
-    OUTPUT_FULL_LATLONG,
-    OUTPUT_MODES,
     SENSOR_HEIGHT,
     SENSOR_WIDTH,
     GeometryError,
@@ -53,7 +50,7 @@ from media_io import (
     require_prores,
     resolve_frame_range,
 )
-from upscaler import AIUpscaler, LanczosUpscaler, UpscaleError
+from upscaler import LanczosUpscaler, UpscaleError
 
 log = logging.getLogger("hal250")
 
@@ -70,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="skinthefish",
         description=(
             "Unwrap RED KOMODO 6K / Entaniya HAL 250 zenith fisheye footage "
-            "into a 360° equirectangular ProRes master (15360×7680, or the "
-            "15360×5333 active strip)."
+            "into a 16:9 ProRes master (15360×8640). The picture fills the "
+            "frame. Color is not converted or sharpened."
         ),
     )
     parser.add_argument("input", nargs="?", type=Path, help="A movie, or a folder of movies.")
@@ -80,12 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         help="Directory for batch outputs. Defaults to each file's own folder.",
-    )
-    parser.add_argument(
-        "--output-mode",
-        choices=OUTPUT_MODES,
-        default=OUTPUT_FULL_LATLONG,
-        help="full-latlong pads the bottom to 2:1 (default). active-crop keeps 15360×5333.",
     )
     parser.add_argument("--calibration", type=Path, help="Lens JSON. CLI geometry flags override it.")
     parser.add_argument("--center-x", type=float, help=f"Optical center X. Default {SENSOR_WIDTH / 2:.1f}.")
@@ -101,42 +92,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--k2", type=float)
     parser.add_argument("--k3", type=float)
     parser.add_argument(
-        "--upscaler",
-        choices=("lanczos", "ai"),
-        default="lanczos",
-        help="lanczos is Lanczos-4 plus a light unsharp. ai runs --sr-model.",
-    )
-    parser.add_argument(
         "--interp",
         choices=tuple(INTERPOLATION),
         default="lanczos4",
-        help="Kernel for the polar remap. Default lanczos4.",
-    )
-    parser.add_argument("--unsharp-amount", type=float, default=0.25)
-    parser.add_argument("--unsharp-sigma", type=float, default=0.6)
-    parser.add_argument("--no-unsharp", action="store_true", help="Skip the unsharp mask after lanczos.")
-    parser.add_argument("--sr-model", type=Path, help="ONNX or TorchScript x2/x4 RGB network. Not bundled.")
-    parser.add_argument("--sr-scale", type=int, help="Override the model's integer scale.")
-    parser.add_argument("--sr-tile", type=int, default=512)
-    parser.add_argument("--sr-tile-pad", type=int, default=32)
-    parser.add_argument("--sr-modulo", type=int, default=8)
-    parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda", "auto"),
-        default="cpu",
-        help="Device for the AI upscaler. Lanczos stays on the CPU.",
+        help="Kernel for the polar remap. The upscale is always Lanczos-4. Default lanczos4.",
     )
     parser.add_argument(
         "--preview-scale",
         type=int,
         default=1,
         help="Divide the 16K raster by this integer for a look-dev render. 1 is the master.",
-    )
-    parser.add_argument(
-        "--black-level",
-        type=int,
-        default=0,
-        help="16-bit RGB code used outside the circle and in the latlong pad. Default 0.",
     )
     parser.add_argument("--start-frame", type=int, default=0, help="Inclusive first frame.")
     parser.add_argument("--end-frame", type=int, help="Exclusive end frame. Default: last frame.")
@@ -223,25 +188,15 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
             lens,
             raster,
             output,
-            args.output_mode,
-            args.upscaler,
             args.interp,
             start,
             end,
             timecode,
         ),
     )
-    if args.upscaler == "ai":
-        if args.sr_model is None:
-            raise UpscaleError(
-                "--upscaler ai needs --sr-model, an ONNX or TorchScript file of an "
-                "integer-scale RGB network (Real-ESRGAN or SwinIR x2). Weights are not bundled."
-            )
-        if not Path(args.sr_model).is_file():
-            raise UpscaleError(f"super-resolution model does not exist: {args.sr_model}")
     if args.dry_run:
         return
-    upscaler = build_upscaler(args)
+    upscaler = LanczosUpscaler()
     maps = build_remap_maps(raster.native_width, raster.native_height, lens)
     interpolation = INTERPOLATION[args.interp]
     started = time.perf_counter()
@@ -255,7 +210,7 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
         output,
         source=source,
         width=raster.delivery_width,
-        height=raster.encoded_height(args.output_mode),
+        height=raster.delivery_height,
         fps=info.fps,
         profile=info.profile if info.profile is not None else 3,
         info=info,
@@ -272,8 +227,6 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
                 maps,
                 upscaler,
                 raster,
-                args.output_mode,
-                args.black_level,
                 interpolation,
             )
             writer.write(picture)
@@ -306,7 +259,7 @@ def calibrate_file(args: argparse.Namespace, source: Path, count: int) -> None:
     sidecar = output.with_suffix(".json")
     if sidecar.exists() and not args.overwrite:
         raise MediaError(f"calibration sidecar exists: {sidecar} (pass --overwrite)")
-    frame = read_one_frame(source, info, frame_index, args.ffmpeg)
+    frame = read_one_frame(source, info, frame_index, args.ffmpeg, layout="rgb")
     image = draw_calibration_overlay(frame, lens)
     output.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(output), image):
@@ -321,44 +274,27 @@ def calibrate_file(args: argparse.Namespace, source: Path, count: int) -> None:
 def unwrap_and_upscale(
     frame: np.ndarray,
     maps: tuple[np.ndarray, np.ndarray],
-    upscaler: LanczosUpscaler | AIUpscaler,
+    upscaler: LanczosUpscaler,
     raster: RasterSpec,
-    output_mode: str,
-    black_level: int,
     interpolation: int,
 ) -> np.ndarray:
-    """Remap at native resolution, upscale the active strip, then pad if needed."""
-    black = (int(black_level), int(black_level), int(black_level))
+    """Remap at the native 16:9 size, then Lanczos-4 upscale to the delivery size.
+
+    Samples that fall outside the source picture are filled with code 0. That
+    is only the missing texels. The frame itself is not padded, and no
+    contrast or color operator runs after the resample.
+    """
     native = cv2.remap(
         frame,
         maps[0],
         maps[1],
         interpolation=interpolation,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=black,
+        borderValue=(0, 0, 0),
     )
     if native.dtype != np.uint16:
         native = np.clip(np.rint(native), 0, 65535).astype(np.uint16)
-    active = upscaler.upscale(native, raster.delivery_width, raster.active_height)
-    if output_mode == OUTPUT_ACTIVE_CROP:
-        return active
-    if output_mode != OUTPUT_FULL_LATLONG:
-        raise GeometryError(f"unknown output mode {output_mode!r}")
-    return pad_bottom(active, raster.full_height, black_level)
-
-
-def pad_bottom(active: np.ndarray, full_height: int, black_level: int) -> np.ndarray:
-    height, width = active.shape[:2]
-    if height == full_height:
-        return active
-    if height > full_height:
-        raise GeometryError(
-            f"active strip is {height} rows and the latlong frame is only {full_height}"
-        )
-    canvas = np.empty((full_height, width, 3), dtype=np.uint16)
-    canvas[:height] = active
-    canvas[height:] = np.uint16(black_level)
-    return canvas
+    return upscaler.upscale(native, raster.delivery_width, raster.delivery_height)
 
 
 def draw_calibration_overlay(frame: np.ndarray, lens: LensModel) -> np.ndarray:
@@ -395,15 +331,11 @@ def describe_job(
     lens: LensModel,
     raster: RasterSpec,
     output: Path,
-    output_mode: str,
-    upscaler_name: str,
     interpolation: str,
     start_frame: int,
     end_frame: int | None,
     timecode: str | None,
 ) -> str:
-    encoded_h = raster.encoded_height(output_mode)
-    pad = raster.pad_rows if output_mode == OUTPUT_FULL_LATLONG else 0
     profile = info.profile if info.profile is not None else "-"
     pix = encoder_pix_fmt(info.profile) if info.profile is not None else "-"
     rate = f"{info.fps.numerator}/{info.fps.denominator}"
@@ -428,14 +360,12 @@ def describe_job(
             f"k [{lens.k1:g}, {lens.k2:g}, {lens.k3:g}]"
         ),
         (
-            f"  unwrap {raster.native_width}×{raster.native_height}  "
-            f"upscale {raster.upscale_x * 100:.2f}% × {raster.upscale_y * 100:.2f}%  "
-            f"{upscaler_name}  remap {interpolation}"
+            f"  unwrap {raster.native_width}×{raster.native_height}  remap {interpolation}  "
+            f"upscale Lanczos-4 {raster.upscale_x * 100:.2f}% × {raster.upscale_y * 100:.2f}%"
         ),
         (
-            f"  output {output}  {raster.delivery_width}×{encoded_h}  {output_mode}  "
-            f"active {raster.delivery_width}×{raster.active_height}  pad {pad}  "
-            f"profile {profile}  {pix}  vendor apl0"
+            f"  output {output}  {raster.delivery_width}×{raster.delivery_height}  16:9  "
+            f"no pad  profile {profile}  {pix}  vendor apl0  yuv444p16 working"
         ),
     ]
     return "\n".join(lines)
@@ -476,25 +406,6 @@ def resolve_lens(args: argparse.Namespace, width: int, height: int) -> LensModel
     return autoscale_default_lens(lens, width, height)
 
 
-def build_upscaler(args: argparse.Namespace) -> LanczosUpscaler | AIUpscaler:
-    if args.upscaler == "lanczos":
-        return LanczosUpscaler(
-            amount=args.unsharp_amount,
-            sigma=args.unsharp_sigma,
-            unsharp=not args.no_unsharp,
-        )
-    if args.sr_model is None:
-        raise UpscaleError("--upscaler ai needs --sr-model")
-    return AIUpscaler(
-        args.sr_model,
-        tile=args.sr_tile,
-        tile_pad=args.sr_tile_pad,
-        modulo=args.sr_modulo,
-        scale=args.sr_scale,
-        device=args.device,
-    )
-
-
 def collect_inputs(path: Path) -> list[Path]:
     if path.is_dir():
         files = sorted(
@@ -516,7 +427,7 @@ def movie_output_path(source: Path, args: argparse.Namespace, count: int) -> Pat
             raise MediaError("use --output-dir when rendering more than one movie")
         return args.output
     directory = args.output_dir if args.output_dir is not None else source.parent
-    suffix = "_latlong" if args.output_mode == OUTPUT_FULL_LATLONG else "_active"
+    suffix = "_uhd"
     if args.preview_scale != 1:
         suffix += f"_preview{args.preview_scale}"
     return directory / f"{source.stem}{suffix}.mov"
@@ -547,13 +458,20 @@ def calibration_frame_index(info: MediaInfo, requested: int | None) -> int:
     return info.frame_count // 2
 
 
-def read_one_frame(source: Path, info: MediaInfo, frame_index: int, ffmpeg: str) -> np.ndarray:
+def read_one_frame(
+    source: Path,
+    info: MediaInfo,
+    frame_index: int,
+    ffmpeg: str,
+    layout: str = "yuv",
+) -> np.ndarray:
     with RawVideoReader(
         source,
         info,
         ffmpeg=ffmpeg,
         start_frame=frame_index,
         end_frame=frame_index + 1,
+        layout=layout,
     ) as reader:
         for frame in reader.frames():
             return np.array(frame, copy=True)
@@ -620,10 +538,6 @@ def _draw_legend(bgr: np.ndarray, lens: LensModel, horizon_r: float, edge_r: flo
 def _validate_args(args: argparse.Namespace) -> None:
     if args.preview_scale < 1:
         raise GeometryError("--preview-scale must be >= 1")
-    if not 0 <= args.black_level <= 65535:
-        raise GeometryError("--black-level must be in [0, 65535]")
-    if args.unsharp_amount < 0 or args.unsharp_sigma < 0:
-        raise GeometryError("unsharp amount and sigma must be >= 0")
     if args.input is None and not args.gui:
         raise MediaError("pass an input movie or folder")
 

@@ -1,8 +1,9 @@
-"""FFmpeg probe, 16-bit decode, and ProRes encode that keeps the source flavor.
+"""FFmpeg probe, 16-bit YUV decode, and ProRes encode that keeps the source flavor.
 
-Frames move as ``rgb48le`` so the remap never sees an 8-bit image. The
-encoder is ``prores_ks`` with the source profile (Proxy, LT, 422, HQ, 4444,
-4444 XQ), ``-vendor apl0``, and the source color tags and timecode.
+Frames stay in ``yuv444p16le``. That is a bit-depth and chroma upsample of the
+source YUV, not a conversion to RGB, so primaries, transfer, and code values
+are not reinterpreted. The encoder is ``prores_ks`` with the source profile,
+``-vendor apl0``, and the same color tags the file arrived with.
 """
 
 from __future__ import annotations
@@ -18,6 +19,10 @@ import threading
 import numpy as np
 
 log = logging.getLogger("hal250.media")
+
+# Working format. 4:4:4 16-bit YUV is a higher-precision copy of the source
+# codes. It is not an RGB conversion.
+PROCESS_PIX_FMT = "yuv444p16le"
 
 # prores_ks stores width and height in the frame header as uint16.
 PRORES_MAX_DIMENSION = 65535
@@ -111,7 +116,7 @@ def delivery_notes(info: MediaInfo) -> list[str]:
     notes: list[str] = []
     if info.has_alpha:
         notes.append(
-            "source has an alpha plane; the unwrap writes RGB and the alpha is discarded"
+            "source has an alpha plane; the unwrap stays in YUV and the alpha is discarded"
         )
     if info.profile is not None and info.profile >= 4:
         notes.append(
@@ -241,8 +246,7 @@ def check_prores_dimensions(width: int, height: int) -> None:
     if width % 16 or height % 16:
         log.warning(
             "delivery %dx%d is not a multiple of 16. prores_ks pads slices "
-            "internally and still stores %dx%d. 15360×7680 is aligned; "
-            "the 15360×5333 active crop is intentionally not.",
+            "internally and still stores %dx%d. The 15360×8640 master is aligned.",
             width,
             height,
             width,
@@ -303,7 +307,12 @@ def shift_timecode(timecode: str, frame_offset: int, fps: Fraction, drop_frame: 
 
 
 class RawVideoReader:
-    """Stream ``rgb48le`` frames from ``ffmpeg`` without writing a temp file."""
+    """Stream frames from ``ffmpeg`` without writing a temp file.
+
+    ``layout="yuv"`` is the master path: planar ``yuv444p16le`` interleaved to
+    ``H×W×3`` as Y, U, V. ``layout="rgb"`` is only for the calibration PNG,
+    which is a viewing still and is never encoded back.
+    """
 
     def __init__(
         self,
@@ -313,12 +322,16 @@ class RawVideoReader:
         ffmpeg: str = "ffmpeg",
         start_frame: int = 0,
         end_frame: int | None = None,
+        layout: str = "yuv",
     ) -> None:
+        if layout not in {"yuv", "rgb"}:
+            raise MediaError(f"unknown frame layout {layout!r}")
         self.path = path
         self.info = info
         self.ffmpeg = ffmpeg
         self.start_frame = start_frame
         self.end_frame = end_frame
+        self.layout = layout
         self.proc: subprocess.Popen[bytes] | None = None
         self._stderr = bytearray()
         self._stderr_thread: threading.Thread | None = None
@@ -355,16 +368,19 @@ class RawVideoReader:
         self.proc = None
 
     def frames(self):
-        """Yield one ``uint16`` RGB frame per decoded picture."""
+        """Yield one ``uint16`` ``H×W×3`` frame per decoded picture."""
         if self.proc is None or self.proc.stdout is None:
             raise MediaError("decoder is not running")
+        height, width = self.info.height, self.info.width
         while True:
             raw = _read_exact(self.proc.stdout, self.frame_bytes)
             if raw is None:
                 break
-            frame = np.frombuffer(raw, dtype="<u2").reshape(self.info.height, self.info.width, 3)
-            # frombuffer is read-only; remap accepts it, and a copy would double RAM.
-            yield frame
+            if self.layout == "rgb":
+                yield np.frombuffer(raw, dtype="<u2").reshape(height, width, 3)
+                continue
+            planes = np.frombuffer(raw, dtype="<u2").reshape(3, height, width)
+            yield np.stack((planes[0], planes[1], planes[2]), axis=-1)
         code = self.proc.wait()
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
@@ -386,13 +402,14 @@ class RawVideoReader:
         trim = _trim_filter(self.start_frame, self.end_frame)
         if trim:
             cmd += ["-vf", trim]
-        cmd += ["-f", "rawvideo", "-pix_fmt", "rgb48le", "-"]
+        pix_fmt = "rgb48le" if self.layout == "rgb" else PROCESS_PIX_FMT
+        cmd += ["-f", "rawvideo", "-pix_fmt", pix_fmt, "-"]
         log.debug("decode command: %s", _format_cmd(cmd))
         return cmd
 
 
 class ProResWriter:
-    """Pipe ``rgb48le`` frames into ``prores_ks`` and mux source audio back in."""
+    """Pipe ``yuv444p16le`` frames into ``prores_ks`` and mux source audio back in."""
 
     def __init__(
         self,
@@ -464,10 +481,10 @@ class ProResWriter:
             raise MediaError("encoder is not running")
         if frame.dtype != np.uint16 or frame.shape != (self.height, self.width, 3):
             raise MediaError(
-                f"encoder expected uint16 RGB {self.width}×{self.height}, "
+                f"encoder expected uint16 YUV {self.width}×{self.height}, "
                 f"got {frame.dtype} {getattr(frame, 'shape', None)}"
             )
-        payload = np.ascontiguousarray(frame).tobytes()
+        payload = interleaved_to_planar_bytes(frame)
         try:
             self.proc.stdin.write(payload)
         except BrokenPipeError as exc:
@@ -513,17 +530,16 @@ class ProResWriter:
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "rgb48le",
+            PROCESS_PIX_FMT,
             "-s",
             f"{self.width}x{self.height}",
             "-r",
             rate,
-            # The pipe is full-range RGB. swscale converts into the output range.
-            "-color_range",
-            "pc",
-            "-i",
-            "pipe:0",
         ]
+        # Tag the pipe with the source color description so swscale does not
+        # invent a matrix on the way back to 10-bit ProRes.
+        cmd += _color_flag_args(self.info)
+        cmd += ["-i", "pipe:0"]
         if self.start_frame or self.frame_count is not None:
             start = Fraction(self.start_frame) / self.fps
             cmd += ["-ss", _format_seconds(start)]
@@ -709,6 +725,18 @@ def _known_range(value: object) -> str | None:
     if lowered in {"pc", "jpeg", "full"}:
         return "pc"
     return None
+
+
+def interleaved_to_planar_bytes(frame: np.ndarray) -> bytes:
+    """Pack ``H×W×3`` YUV back into ffmpeg's planar ``yuv444p16le`` order."""
+    return b"".join(np.ascontiguousarray(frame[:, :, channel]).tobytes() for channel in range(3))
+
+
+def _color_flag_args(info: MediaInfo) -> list[str]:
+    args: list[str] = []
+    for flag, value in _color_output_flags(info):
+        args.extend((flag, value))
+    return args
 
 
 def _color_output_flags(info: MediaInfo) -> list[tuple[str, str]]:
