@@ -46,6 +46,8 @@ if errorlevel 1 (
 echo.
 echo Opening Skinthefish in your browser.
 echo Leave this window open while you use the app.
+echo If export says it will take hours, double-click Skinthefish-GPU.bat once.
+echo That puts the unwrap on the NVIDIA card and encodes several frames at once.
 echo.
 %PY% "%~dp0studio.py"
 if errorlevel 1 pause

@@ -38,6 +38,7 @@ from media_io import (
     probe_media,
     require_prores,
 )
+from resample import gpu_status
 from upscaler import LanczosUpscaler
 
 log = logging.getLogger("hal250.studio")
@@ -71,11 +72,16 @@ class Studio:
     def health(self, initial_path: Path | None = None) -> dict[str, object]:
         ffmpeg = shutil.which("ffmpeg")
         ffprobe = shutil.which("ffprobe")
+        gpu = gpu_status()
+        if not (ffmpeg and ffprobe):
+            message = "FFmpeg is not on PATH. On Windows, run Skinthefish.bat again after installing it."
+        else:
+            message = str(gpu["hint"])
         return {
             "ffmpeg": bool(ffmpeg and ffprobe),
-            "message": ""
-            if ffmpeg and ffprobe
-            else "FFmpeg is not on PATH. On Windows, run Skinthefish.bat again after installing it.",
+            "message": message,
+            "gpu": bool(gpu["available"]),
+            "gpu_name": gpu["name"],
             "initial_path": str(initial_path) if initial_path else "",
             "profiles": list(OUTPUT_PROFILE_CHOICES),
         }

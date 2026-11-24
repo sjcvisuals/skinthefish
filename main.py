@@ -35,18 +35,17 @@ from geometry import (
     LensModel,
     RasterSpec,
     autoscale_default_lens,
-    build_remap_maps,
     delivery_raster,
     lens_as_public_dict,
     load_lens_json,
 )
 from media_io import (
+    OUTPUT_PROFILE_CHOICES,
+    ChunkedProResWriter,
     MediaError,
     MediaInfo,
-    ProResWriter,
     RawVideoReader,
     delivery_notes,
-    OUTPUT_PROFILE_CHOICES,
     encoder_pix_fmt,
     output_timecode,
     probe_media,
@@ -55,6 +54,7 @@ from media_io import (
     resolve_frame_range,
     resolve_output_profile,
 )
+from resample import FrameResampler, cpu_unwrap, resolve_device
 from upscaler import LanczosUpscaler, UpscaleError
 
 log = logging.getLogger("hal250")
@@ -146,6 +146,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Probe and print the plan. Do not decode.")
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="auto uses an NVIDIA GPU for the master resample when CUDA PyTorch is installed. The preview stays on the CPU.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="How many ProRes encodes to run at once. 0 uses one per CPU core. prores_ks does not fill extra cores inside one encode.",
+    )
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
     parser.add_argument("--gui", action="store_true", help="Open the lightweight wrapper.")
@@ -230,42 +242,43 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
     )
     if args.dry_run:
         return
-    upscaler = LanczosUpscaler()
-    maps = build_remap_maps(raster.native_width, raster.native_height, lens)
-    interpolation = INTERPOLATION[args.interp]
+    device = resolve_device(getattr(args, "device", "auto"), raster.delivery_width * raster.delivery_height)
+    resampler = FrameResampler(lens, raster, INTERPOLATION[args.interp], device)
+    log.info("resample: %s", resampler.label)
+    previous_threads = cv2.getNumThreads()
+    # One ProRes process barely uses extra cores. Leave half of them for the
+    # resample and give the rest to the parallel encodes.
+    cv2.setNumThreads(max(1, (os.cpu_count() or 1) // 2))
     started = time.perf_counter()
-    with RawVideoReader(
-        source,
-        info,
-        ffmpeg=args.ffmpeg,
-        start_frame=0 if whole_file else start,
-        end_frame=None if whole_file else end,
-    ) as reader, ProResWriter(
-        output,
-        source=source,
-        width=raster.delivery_width,
-        height=raster.delivery_height,
-        fps=info.fps,
-        profile=output_profile,
-        info=info,
-        timecode=timecode,
-        start_frame=0 if whole_file else start,
-        frame_count=None if whole_file else count,
-        ffmpeg=args.ffmpeg,
-        overwrite=args.overwrite,
-    ) as writer:
+    try:
         progress = Progress(count, getattr(args, "on_progress", None))
-        for frame in reader.frames():
-            picture = unwrap_and_upscale(
-                frame,
-                maps,
-                upscaler,
-                raster,
-                interpolation,
-            )
-            writer.write(picture)
-            progress.update()
+        with RawVideoReader(
+            source,
+            info,
+            ffmpeg=args.ffmpeg,
+            start_frame=0 if whole_file else start,
+            end_frame=None if whole_file else end,
+        ) as reader, ChunkedProResWriter(
+            output,
+            source=source,
+            width=raster.delivery_width,
+            height=raster.delivery_height,
+            fps=info.fps,
+            profile=output_profile,
+            info=info,
+            timecode=timecode,
+            start_frame=0 if whole_file else start,
+            frame_count=None if whole_file else count,
+            ffmpeg=args.ffmpeg,
+            overwrite=args.overwrite,
+            workers=getattr(args, "workers", 0),
+            on_encoded=progress.advance,
+        ) as writer:
+            for frame in reader.frames():
+                writer.write(resampler.apply(frame))
         progress.close()
+    finally:
+        cv2.setNumThreads(previous_threads)
     elapsed = time.perf_counter() - started
     log.info("wrote %s (%d frames, %.1fs)", output, writer.frames_written, elapsed)
 
@@ -318,17 +331,7 @@ def unwrap_and_upscale(
     is only the missing texels. The frame itself is not padded, and no
     contrast or color operator runs after the resample.
     """
-    native = cv2.remap(
-        frame,
-        maps[0],
-        maps[1],
-        interpolation=interpolation,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-    if native.dtype != np.uint16:
-        native = np.clip(np.rint(native), 0, 65535).astype(np.uint16)
-    return upscaler.upscale(native, raster.delivery_width, raster.delivery_height)
+    return cpu_unwrap(frame, maps, upscaler, raster, interpolation)
 
 
 def draw_calibration_overlay(frame: np.ndarray, lens: LensModel) -> np.ndarray:
@@ -592,7 +595,10 @@ class Progress:
         self.callback = callback
 
     def update(self) -> None:
-        self.count += 1
+        self.advance(1)
+
+    def advance(self, count: int) -> None:
+        self.count += count
         elapsed = time.perf_counter() - self.started
         rate = self.count / elapsed if elapsed else 0.0
         if self.total:

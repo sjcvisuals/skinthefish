@@ -151,6 +151,14 @@ What to check on a 3240×3240 clip:
 
 The input has to already be Apple ProRes. H.264, a still sequence, or an R3D file is refused.
 
+## Speed
+
+A long export is slow because each ProRes frame is encoded by one CPU core. Giving that one encode more threads does not make it much faster. The app now runs one encode per core at the same time, then joins the pieces. The resample runs alongside those encodes.
+
+The NVIDIA card does not encode ProRes. It can do the resample. Double-click `Skinthefish-GPU.bat` once. That installs the CUDA build of PyTorch. After that, an 8K or 16K export samples the fisheye on the GPU with bicubic interpolation. Bicubic is still a geometric resample, the same kind of step as Lanczos, not a neural upscale. A flat color stays a flat color. Previews stay on the CPU, where a screen-sized frame is already fast.
+
+8K is a quarter of the pixels of 16K, so it is the right first export on a long clip.
+
 On macOS, `brew install ffmpeg python` and then `python3 studio.py`. There is no Windows-only path in the unwrap itself.
 
 Useful flags: `--interp cubic` (the remap kernel only; the upscale stays Lanczos-4), `--start-frame`, `--end-frame`, `--dry-run`, `-v`. A half-res 3072×1620 proxy of the same framing scales the default center and radius automatically. An explicit center, radius, or calibration file is used as written.
