@@ -139,7 +139,7 @@ python3 studio.py
 
 On Windows, double-click `Skinthefish.bat` in this folder. The first run installs the Python packages and, if needed, FFmpeg. Leave the black window open while the page is open.
 
-Before that, install Python 3.12 from [python.org](https://www.python.org/downloads/windows/) and tick **Add python.exe to PATH**. If FFmpeg does not install from the script, run `winget install Gyan.FFmpeg`, close the window, and double-click the script again. If `winget` is missing, download the essentials build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) and add its `bin` folder to PATH.
+Python 3.15 has no Windows CUDA build of PyTorch, so the launchers use Python 3.13, 3.12, 3.14, or 3.11 when one of those is installed. `Skinthefish-GPU.bat` installs Python 3.13 itself if the only Python on the machine is 3.15. If FFmpeg does not install from the script, run `winget install Gyan.FFmpeg`, close the window, and double-click the script again. If `winget` is missing, download the essentials build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) and add its `bin` folder to PATH.
 
 What to check on a 3240×3240 clip:
 
@@ -155,7 +155,7 @@ The input has to already be Apple ProRes. H.264, a still sequence, or an R3D fil
 
 A long export is slow because each ProRes frame is encoded by one CPU core. Giving that one encode more threads does not make it much faster. The app now runs one encode per core at the same time, then joins the pieces. The resample runs alongside those encodes.
 
-The NVIDIA card does not encode ProRes. It can do the resample. Double-click `Skinthefish-GPU.bat` once. That installs the CUDA build of PyTorch. After that, an 8K or 16K export samples the fisheye on the GPU with bicubic interpolation. Bicubic is still a geometric resample, the same kind of step as Lanczos, not a neural upscale. A flat color stays a flat color. Previews stay on the CPU, where a screen-sized frame is already fast.
+The NVIDIA card does not encode ProRes. It can do the resample. Double-click `Skinthefish-GPU.bat` once. That installs Python 3.13 when the default Python is 3.15, then installs a CUDA build of PyTorch that matches the driver (`cu128` for driver CUDA 12.8 or newer, `cu124` for older drivers). After that, an 8K or 16K export samples the fisheye on the GPU with bicubic interpolation. Bicubic is still a geometric resample, the same kind of step as Lanczos, not a neural upscale. A flat color stays a flat color. Previews stay on the CPU, where a screen-sized frame is already fast.
 
 8K is a quarter of the pixels of 16K, so it is the right first export on a long clip.
 
