@@ -18,6 +18,7 @@ from media_io import (
     parse_timecode,
     shift_timecode,
 )
+from cuda_index import index_for_cuda
 from resample import normalized_grid
 
 
@@ -152,6 +153,13 @@ def test_encoder_plan_keeps_16k_chunks_to_one_frame():
     preview_workers, preview_chunk = encoder_plan(960, 540)
     assert preview_chunk == 12
     assert encoder_plan(960, 540, requested_workers=2)[0] == 2
+
+
+def test_cuda_wheel_follows_the_driver():
+    assert index_for_cuda(12, 8) == "cu128"
+    assert index_for_cuda(13, 0) == "cu128"
+    assert index_for_cuda(12, 7) == "cu124"
+    assert index_for_cuda(12, 4) == "cu124"
 
 
 def test_gpu_grid_lands_on_the_same_pixel_center_as_opencv():

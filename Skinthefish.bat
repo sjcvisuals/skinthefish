@@ -1,29 +1,13 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 title Skinthefish
 
-where py >nul 2>&1
-if %errorlevel%==0 (
-  set "PY=py -3"
-) else (
-  where python >nul 2>&1
-  if %errorlevel%==0 (
-    set "PY=python"
-  ) else (
-    echo Python was not found.
-    echo.
-    echo 1. Install Python 3.12 from https://www.python.org/downloads/windows/
-    echo 2. On the first page of the installer, tick "Add python.exe to PATH".
-    echo 3. Double-click Skinthefish.bat again.
-    start https://www.python.org/downloads/windows/
-    pause
-    exit /b 1
-  )
-)
+call "%~dp0select-python.bat"
+if errorlevel 1 exit /b 1
 
 echo Installing the Python packages this app needs...
-%PY% -m pip install -r "%~dp0requirements.txt"
+!PY! -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 (
   echo.
   echo pip could not install the packages. Leave this window open and read the message above.
@@ -47,7 +31,7 @@ echo.
 echo Opening Skinthefish in your browser.
 echo Leave this window open while you use the app.
 echo If export says it will take hours, double-click Skinthefish-GPU.bat once.
-echo That puts the unwrap on the NVIDIA card and encodes several frames at once.
+echo That installs Python 3.13 if needed, then puts the unwrap on the NVIDIA card.
 echo.
-%PY% "%~dp0studio.py"
+!PY! "%~dp0studio.py"
 if errorlevel 1 pause
