@@ -127,59 +127,31 @@ Quarter-resolution look-dev of the 8K raster, still 16:9, still Lanczos-4:
 python3 main.py clip.mov --size 8k --preview-scale 4 -o /tmp/lookdev.mov
 ```
 
-## Test on Windows
+## App
 
-The input has to already be Apple ProRes. A 3240×3240 RED export that is H.264, a still sequence, or an R3D will be refused. Export ProRes in the flavor you want back (422 HQ is the usual one), then unwrap.
+`studio.py` opens a page on this computer. It shows one frame of the fisheye and the unwrapped preview side by side. Export stays off until that preview is on screen. You then pick the ProRes codec and a save path.
 
-1. Install Python 3.11 or 3.12 from [python.org](https://www.python.org/downloads/windows/). On the first installer page, turn on **Add python.exe to PATH**. The standard installer includes Tk, which the optional GUI needs.
-2. Install FFmpeg with a build that contains `prores_ks`. In PowerShell:
+The pictures in the page are a viewing image. The file Export writes is the full 8K or 16K master, still in the source YUV, with the same Lanczos path as the command line.
 
-```powershell
-winget install Gyan.FFmpeg
+```bash
+python3 studio.py
 ```
 
-Close the terminal, open a new one, and check:
+On Windows, double-click `Skinthefish.bat` in this folder. The first run installs the Python packages and, if needed, FFmpeg. Leave the black window open while the page is open.
 
-```powershell
-ffmpeg -hide_banner -encoders | findstr prores_ks
-ffprobe -version
-```
+Before that, install Python 3.12 from [python.org](https://www.python.org/downloads/windows/) and tick **Add python.exe to PATH**. If FFmpeg does not install from the script, run `winget install Gyan.FFmpeg`, close the window, and double-click the script again. If `winget` is missing, download the essentials build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) and add its `bin` folder to PATH.
 
-If `winget` is not available, download the essentials build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), unzip it, and add its `bin` folder to PATH.
+What to check on a 3240×3240 clip:
 
-3. In a terminal, from the folder that contains `main.py`:
+1. Open the movie. The header should show 3240×3240, and the center should start at 1620, 1620 with radius 1620.
+2. The yellow ring sits on the edge of the circle. If it does not, nudge Center X, Center Y, and Circle radius. The preview updates, and Export turns off until the new unwrap is visible.
+3. Choose 8K or 16K. 8K is the practical first export. 16K needs several gigabytes free.
+4. Pick the ProRes codec. "Same as the source" keeps the flavor of the file you opened. The other choices write Proxy, LT, 422, HQ, 4444, or 4444 XQ.
+5. Export. The page shows frame progress. The movie lands at the path you chose.
 
-```powershell
-py -3 -m pip install -r requirements.txt
-ffprobe -hide_banner C:\media\clip.mov
-py -3 main.py C:\media\clip.mov --dry-run --size 8k
-```
+The input has to already be Apple ProRes. H.264, a still sequence, or an R3D file is refused.
 
-`ffprobe` should show `3240x3240` and `prores`. The dry run should show center `(1620.000, 1620.000)`, radius `1620.000`, and output `7680×4320`. It does not write a movie.
-
-4. Write the calibration still and open the PNG. The yellow ring should sit on the edge of the fisheye circle, and the white crosshair on its center. If the ring is inset or off-center, the square was not a tight crop. Measure the real center and radius and pass them on the next command.
-
-```powershell
-py -3 main.py C:\media\clip.mov --calibrate
-```
-
-5. Render a short look before a full file. This writes eight frames at a quarter of 8K:
-
-```powershell
-py -3 main.py C:\media\clip.mov --size 8k --preview-scale 4 --end-frame 8 -o C:\media\look.mov
-ffprobe -hide_banner C:\media\look.mov
-```
-
-The picture size should be 16:9, the ProRes profile and timecode should match the source, and the horizon should sit about 72% of the way down the frame.
-
-6. Render the master you want. 8K is the practical first full pass. 16K needs several gigabytes free per frame.
-
-```powershell
-py -3 main.py C:\media\clip.mov --size 8k -o C:\media\clip_8k.mov
-py -3 main.py C:\media\clip.mov --size 16k -o C:\media\clip_16k.mov
-```
-
-On macOS the same commands work with `python3` after `brew install ffmpeg python`. There is no Windows-only or Mac-only path in the tool.
+On macOS, `brew install ffmpeg python` and then `python3 studio.py`. There is no Windows-only path in the unwrap itself.
 
 Useful flags: `--interp cubic` (the remap kernel only; the upscale stays Lanczos-4), `--start-frame`, `--end-frame`, `--dry-run`, `-v`. A half-res 3072×1620 proxy of the same framing scales the default center and radius automatically. An explicit center, radius, or calibration file is used as written.
 
@@ -187,7 +159,7 @@ Useful flags: `--interp cubic` (the remap kernel only; the upscale stays Lanczos
 
 | Source | Output |
 | --- | --- |
-| ProRes profile fourcc (`apco` `apcs` `apcn` `apch` `ap4h` `ap4x`) | same `-profile:v` on `prores_ks` |
+| ProRes profile fourcc (`apco` `apcs` `apcn` `apch` `ap4h` `ap4x`) | same profile, unless the app or `--profile` picks another |
 | 422 profiles | `yuv422p10le` |
 | 4444 and 4444 XQ | `yuv444p10le` into the encoder |
 | Frame rate | exact rational (`24000/1001` stays that) |
@@ -213,7 +185,10 @@ Limits, so they are not a surprise on a render node:
 | `geometry.py` | Equidistant model, remap grids, 16:9 raster sizes |
 | `upscaler.py` | Wrapped Lanczos-4 resize to the delivery size |
 | `media_io.py` | ffprobe, `yuv444p16le` decode, `prores_ks` encode |
-| `gui.py` | Optional tkinter form that shells out to `main.py` |
+| `studio.py` | Preview page: original, unwrap, then ProRes export |
+| `web/index.html` | The page the app serves |
+| `Skinthefish.bat` | Windows double-click install and launch |
+| `gui.py` | Older tkinter form that shells out to `main.py` |
 | `examples/lens_calibration.example.json` | Starting calibration |
 
 ## Tests

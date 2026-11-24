@@ -99,6 +99,36 @@ class MediaInfo:
         return _PROFILE_LABEL.get(self.profile, self.profile_name or "prores")
 
 
+OUTPUT_PROFILE_CHOICES = ("match", "proxy", "lt", "422", "hq", "4444", "4444xq")
+
+_CHOICE_TO_PROFILE = {
+    "proxy": 0,
+    "lt": 1,
+    "422": 2,
+    "hq": 3,
+    "4444": 4,
+    "4444xq": 5,
+}
+
+
+def profile_label(profile: int) -> str:
+    return _PROFILE_LABEL.get(profile, str(profile))
+
+
+def resolve_output_profile(choice: str | None, source_profile: int | None) -> int:
+    """Pick the ProRes profile to write. ``match`` keeps the source profile."""
+    selected = (choice or "match").strip().lower()
+    if selected == "match":
+        if source_profile is None:
+            raise MediaError("the source has no ProRes profile to match")
+        return source_profile
+    if selected not in _CHOICE_TO_PROFILE:
+        raise MediaError(
+            f"unknown ProRes profile {choice!r}. Choose one of {', '.join(OUTPUT_PROFILE_CHOICES)}."
+        )
+    return _CHOICE_TO_PROFILE[selected]
+
+
 def encoder_pix_fmt(profile: int) -> str:
     """Pixel format passed to ``prores_ks``.
 

@@ -46,11 +46,14 @@ from media_io import (
     ProResWriter,
     RawVideoReader,
     delivery_notes,
+    OUTPUT_PROFILE_CHOICES,
     encoder_pix_fmt,
     output_timecode,
     probe_media,
+    profile_label,
     require_prores,
     resolve_frame_range,
+    resolve_output_profile,
 )
 from upscaler import LanczosUpscaler, UpscaleError
 
@@ -135,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--frame", type=int, help="Frame index for --calibrate. Default: the middle frame.")
     parser.add_argument("--calibrate-output", type=Path, help="PNG path for --calibrate.")
+    parser.add_argument(
+        "--profile",
+        choices=OUTPUT_PROFILE_CHOICES,
+        default="match",
+        help="ProRes codec to write. match keeps the source profile. Default match.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Probe and print the plan. Do not decode.")
     parser.add_argument("--ffmpeg", default="ffmpeg")
@@ -160,10 +169,10 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.verbose)
     cv2.setNumThreads(os.cpu_count() or 1)
     try:
-        if args.gui:
-            from gui import launch
+        if args.gui or (args.input is None and argv is None):
+            from studio import serve
 
-            launch(args)
+            serve(initial_path=args.input)
             return 0
         return run(args)
     except (GeometryError, MediaError, UpscaleError) as exc:
@@ -201,6 +210,7 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
     raster = delivery_raster(lens.theta_max_deg, args.preview_scale, args.size)
     start, end, count = resolve_frame_range(info, args.start_frame, args.end_frame)
     timecode = output_timecode(info, start)
+    output_profile = resolve_output_profile(getattr(args, "profile", "match"), info.profile)
     whole_file = start == 0 and (end is None or end == info.frame_count)
     if output.resolve() == source.resolve():
         raise MediaError(f"output path is the same as the input: {output}")
@@ -215,6 +225,7 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
             start,
             end,
             timecode,
+            output_profile,
         ),
     )
     if args.dry_run:
@@ -235,7 +246,7 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
         width=raster.delivery_width,
         height=raster.delivery_height,
         fps=info.fps,
-        profile=info.profile if info.profile is not None else 3,
+        profile=output_profile,
         info=info,
         timecode=timecode,
         start_frame=0 if whole_file else start,
@@ -243,7 +254,7 @@ def render_movie(args: argparse.Namespace, source: Path, output: Path) -> None:
         ffmpeg=args.ffmpeg,
         overwrite=args.overwrite,
     ) as writer:
-        progress = Progress(count)
+        progress = Progress(count, getattr(args, "on_progress", None))
         for frame in reader.frames():
             picture = unwrap_and_upscale(
                 frame,
@@ -358,9 +369,10 @@ def describe_job(
     start_frame: int,
     end_frame: int | None,
     timecode: str | None,
+    output_profile: int,
 ) -> str:
-    profile = info.profile if info.profile is not None else "-"
-    pix = encoder_pix_fmt(info.profile) if info.profile is not None else "-"
+    profile = profile_label(output_profile)
+    pix = encoder_pix_fmt(output_profile)
     rate = f"{info.fps.numerator}/{info.fps.denominator}"
     end_text = "end" if end_frame is None else str(end_frame)
     lines = [
@@ -573,10 +585,11 @@ def _ensure_tools(ffmpeg: str, ffprobe: str) -> None:
 
 
 class Progress:
-    def __init__(self, total: int | None) -> None:
+    def __init__(self, total: int | None, callback=None) -> None:
         self.total = total
         self.count = 0
         self.started = time.perf_counter()
+        self.callback = callback
 
     def update(self) -> None:
         self.count += 1
@@ -589,6 +602,8 @@ class Progress:
         else:
             message = f"frame {self.count}  {rate:.2f} fps"
         print("\r" + message, end="", file=sys.stderr, flush=True)
+        if self.callback is not None:
+            self.callback(self.count, self.total, message)
 
     def close(self) -> None:
         if self.count:
